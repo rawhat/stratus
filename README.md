@@ -41,7 +41,7 @@ pub fn main() {
       init: fn() { #(Nil, None) },
       loop: fn(msg, state, conn) {
         case msg {
-          stratus.Text(msg) -> {
+          stratus.Text(_msg) -> {
             let assert Ok(_resp) =
               stratus.send_text_message(conn, "hello, world!")
             actor.continue(state)
@@ -58,10 +58,9 @@ pub fn main() {
         }
       },
     )
+    |> stratus.on_close(fn(_state) { io.println("oh noooo") })
 
-  let res = stratus.initialize(builder)
-  io.debug(res)
-  let assert Ok(subj) = res
+  let assert Ok(subj) = stratus.initialize(builder)
 
   let timer =
     repeatedly.call(1000, Nil, fn(_state, _count_) {
@@ -71,9 +70,11 @@ pub fn main() {
       stratus.send_message(subj, SendText(now))
     })
 
-  process.sleep(5000)
+  process.sleep(6000)
 
   stratus.send_message(subj, Close)
+
+  repeatedly.stop(timer)
 }
 ```
 
