@@ -17,6 +17,7 @@ import gramps.{
   type DataFrame, BinaryFrame, Complete, Data as DataFrame, TextFrame,
 }
 
+/// This holds some information needed to communicate with the WebSocket.
 pub opaque type Connection {
   Connection(socket: Socket, transport: Transport)
 }
@@ -29,6 +30,8 @@ fn from_socket_message(msg: SocketMessage) -> InternalMessage(user_message) {
   }
 }
 
+/// These are the messages emitted or received by the underlying process.  You
+/// should only need to interact with `Message` below.
 pub opaque type InternalMessage(user_message) {
   UserMessage(user_message)
   Err(SocketReason)
@@ -37,6 +40,7 @@ pub opaque type InternalMessage(user_message) {
   Shutdown
 }
 
+/// This is the type of message your handler might receive.
 pub type Message(user_message) {
   Text(String)
   Binary(BitArray)
@@ -50,19 +54,54 @@ pub opaque type Builder(state, user_message) {
     init: fn() -> #(state, Option(Selector(user_message))),
     loop: fn(Message(user_message), state, Connection) ->
       actor.Next(user_message, state),
+    on_close: fn(state) -> Nil,
   )
 }
 
+/// This creates a builder to set up a WebSocket actor. This will use default
+/// values for the connection initialization timeout, and provide an empty
+/// function to be called when the server closes the connection. If you want to
+/// customize either of those, see the helper functions `with_init_timeout` and
+/// `on_close`.
 pub fn websocket(
   uri uri: Uri,
   init init: fn() -> #(state, Option(Selector(user_message))),
   loop loop: fn(Message(user_message), state, Connection) ->
     actor.Next(user_message, state),
 ) -> Builder(state, user_message) {
-  Builder(uri: uri, init_timeout: None, init: init, loop: loop)
+  Builder(
+    uri: uri,
+    init_timeout: None,
+    init: init,
+    loop: loop,
+    on_close: fn(_state) { Nil },
+  )
 }
 
-pub type State(state) {
+/// The WebSocket actor will attempt to connect to the server when you call
+/// `initialize`.  It will also call your `init` function.  This timeout serves
+/// as the upper bound for all of these actions.  The default is 5 seconds.
+pub fn with_init_timeout(
+  builder: Builder(state, user_message),
+  timeout: Int,
+) -> Builder(state, user_message) {
+  Builder(..builder, init_timeout: Some(timeout))
+}
+
+/// You can provide a function to be called when the connection is closed. This
+/// function receives the last value for the state of the WebSocket.
+///
+/// NOTE:  If you manually call `stratus.close`, this function will not be
+/// called. I'm unsure right now if this is a bug or working as intended. But
+/// you will be in the loop with the state value handy.
+pub fn on_close(
+  builder: Builder(state, user_message),
+  on_close: fn(state) -> Nil,
+) -> Builder(state, user_message) {
+  Builder(..builder, on_close: on_close)
+}
+
+type State(state) {
   State(
     buffer: BitArray,
     incomplete: Option(DataFrame),
@@ -71,31 +110,31 @@ pub type State(state) {
   )
 }
 
-pub type UriError {
-  MissingHost
-  MissingPort
-}
-
-pub type StartError {
-  ActorError(actor.StartError)
-  UriError(UriError)
-}
-
+/// This opens the WebSocket connection with the provided `Builder`. It makes
+/// some assumptions about the URI if you do not provide it.  It will use ports
+/// 80 or 443 for `ws` or `wss` respectively.
+///
+/// It will open the connection and perform the WebSocket handshake. If this
+/// fails, the actor will fail to start with the given reason as a string value.
+///
+/// After that, received messages will be passed to your loop, and you can use
+/// the helper functions to send messages to the server. The `close` method will
+/// send a close frame and end the connection.
 pub fn initialize(
   builder: Builder(state, user_message),
-) -> Result(Subject(InternalMessage(user_message)), StartError) {
+) -> Result(Subject(InternalMessage(user_message)), actor.StartError) {
   let transport = case builder.uri.scheme {
     Some("wss") -> Ssl
     _ -> Tcp
   }
-  use host <- result.try(option.to_result(
-    builder.uri.host,
-    UriError(MissingHost),
-  ))
-  use port <- result.try(option.to_result(
-    builder.uri.port,
-    UriError(MissingPort),
-  ))
+  let host = option.unwrap(builder.uri.host, "localhost")
+  let port =
+    option.lazy_unwrap(builder.uri.port, fn() {
+      case transport {
+        Ssl -> 443
+        Tcp -> 80
+      }
+    })
 
   let origin = case builder.uri.scheme, port {
     Some("wss"), 443 -> "https://" <> host
@@ -161,6 +200,7 @@ pub fn initialize(
         case msg {
           UserMessage(user_message) -> {
             case builder.loop(User(user_message), state.user_state, conn) {
+              // TODO:  de-dupe this
               actor.Continue(user_state, user_selector) -> {
                 let new_state = State(..state, user_state: user_state)
                 case user_selector {
@@ -184,7 +224,6 @@ pub fn initialize(
             actor.Stop(process.Abnormal(string.inspect(reason)))
           }
           Data(bits) -> {
-            // io.debug(#("got some data", bits))
             gramps.frame_from_message(bit_array.append(state.buffer, bits))
             |> result.map(fn(data) {
               let #(parsed_frame, rest) = data
@@ -198,16 +237,29 @@ pub fn initialize(
                 _ -> panic as "Incomplete messages not supported right now"
               }
               case builder.loop(frame, state.user_state, conn) {
-                actor.Continue(user_state, _selector) -> {
+                // TODO:  de-dupe this
+                actor.Continue(user_state, user_selector) -> {
                   let assert Ok(_) =
                     transport.set_opts(
                       transport,
                       state.socket,
                       socket.convert_options([Receive(Once)]),
                     )
-                  actor.continue(
-                    State(..state, user_state: user_state, buffer: rest),
-                  )
+                  let new_state =
+                    State(..state, user_state: user_state, buffer: rest)
+                  case user_selector {
+                    Some(user_selector) -> {
+                      let selector =
+                        user_selector
+                        |> process.map_selector(UserMessage)
+                        |> process.merge_selector(process.map_selector(
+                          socket.selector(),
+                          from_socket_message,
+                        ))
+                      actor.Continue(new_state, Some(selector))
+                    }
+                    _ -> actor.continue(new_state)
+                  }
                 }
                 actor.Stop(reason) -> actor.Stop(reason)
               }
@@ -224,17 +276,31 @@ pub fn initialize(
               )
             })
           }
+          Closed -> {
+            builder.on_close(state.user_state)
+            actor.Stop(process.Normal)
+          }
           // TODO:  handle shutdown better?
-          Closed | Shutdown -> {
+          Shutdown -> {
             actor.Stop(process.Normal)
           }
         }
       },
     ),
   )
-  |> result.map_error(ActorError)
 }
 
+/// Since the actor receives the raw data from the WebSocket, it needs a less
+/// ergonomic message type. You probably don't want (read: shouldn't be able to)
+/// send `Data(bits)` to the process, so that message type is opaque.
+///
+/// To get around that, this helper method lets you provide your custom message
+/// type to the actor.
+///
+/// This is likely what you want if you want to be able to tell the actor to
+/// send data to the server. Your message type would be -- in plain language --
+/// "this thing happened", and your loop would then send whatever relevant data
+/// corresponds to that event.
 pub fn send_message(
   subject: Subject(InternalMessage(user_message)),
   message: user_message,
@@ -242,6 +308,8 @@ pub fn send_message(
   process.send(subject, UserMessage(message))
 }
 
+/// From within the actor loop, this is how you send a WebSocket text frame.
+/// This must be valid UTF-8, so it is a `String`.
 pub fn send_text_message(
   conn: Connection,
   msg: String,
@@ -250,6 +318,7 @@ pub fn send_text_message(
   transport.send(conn.transport, conn.socket, frame)
 }
 
+/// From within the actor loop, this is how you send a WebSocket text frame.
 pub fn send_binary_message(
   conn: Connection,
   msg: BitArray,
@@ -258,11 +327,12 @@ pub fn send_binary_message(
   transport.send(conn.transport, conn.socket, frame)
 }
 
+/// This will close the WebSocket connection.
 pub fn close(conn: Connection) -> Result(Nil, SocketReason) {
   let frame =
     gramps.frame_to_bytes_builder(
       gramps.Control(gramps.CloseFrame(0, <<>>)),
-      None,
+      Some(<<>>),
     )
   transport.send(conn.transport, conn.socket, frame)
 }

@@ -80,7 +80,6 @@ type ErlangSocketMessage {
   TcpError
 }
 
-// TODO:  clean this up a lot
 pub fn selector() -> Selector(SocketMessage) {
   process.new_selector()
   |> process.selecting_record3(Tcp, fn(_socket, msg) {

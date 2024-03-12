@@ -11,8 +11,6 @@ pub type Transport {
   Ssl
 }
 
-import gleam/io
-
 pub fn connect(
   transport: Transport,
   host: Charlist,
