@@ -32,3 +32,6 @@ pub fn set_opts(
   socket: Socket,
   opts: List(TcpOption),
 ) -> Result(Nil, SocketReason)
+
+@external(erlang, "stratus_ffi", "ssl_start")
+pub fn start() -> Result(Nil, Nil)

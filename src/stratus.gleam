@@ -2,19 +2,23 @@ import gleam/bytes_builder.{type BytesBuilder}
 import gleam/bit_array
 import gleam/erlang/charlist
 import gleam/erlang/process.{type Selector, type Subject}
+import gleam/http/request.{type Request}
+import gleam/http.{Http, Https}
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
 import gleam/result
 import gleam/string
-import gleam/uri.{type Uri}
 import stratus/internal/socket.{
-  type Socket, type SocketMessage, type SocketReason, Once, Pull, Receive,
+  type Socket, type SocketMessage, type SocketReason, Cacerts, Once, Pull,
+  Receive,
 }
 import stratus/internal/transport.{type Transport, Ssl, Tcp}
+import stratus/internal/ssl
 import gramps.{
-  type DataFrame, BinaryFrame, Complete, Data as DataFrame, TextFrame,
+  type DataFrame, BinaryFrame, CloseFrame, Complete, Continuation, Control,
+  Data as DataFrame, Incomplete, PingFrame, PongFrame, TextFrame,
 }
 
 /// This holds some information needed to communicate with the WebSocket.
@@ -49,7 +53,7 @@ pub type Message(user_message) {
 
 pub opaque type Builder(state, user_message) {
   Builder(
-    uri: Uri,
+    request: Request(String),
     init_timeout: Option(Int),
     init: fn() -> #(state, Option(Selector(user_message))),
     loop: fn(Message(user_message), state, Connection) ->
@@ -64,13 +68,13 @@ pub opaque type Builder(state, user_message) {
 /// customize either of those, see the helper functions `with_init_timeout` and
 /// `on_close`.
 pub fn websocket(
-  uri uri: Uri,
+  request req: Request(String),
   init init: fn() -> #(state, Option(Selector(user_message))),
   loop loop: fn(Message(user_message), state, Connection) ->
     actor.Next(user_message, state),
 ) -> Builder(state, user_message) {
   Builder(
-    uri: uri,
+    request: req,
     init_timeout: None,
     init: init,
     loop: loop,
@@ -110,9 +114,9 @@ type State(state) {
   )
 }
 
+//  ports 80 or 443 for `ws` or `wss` respectively.
 /// This opens the WebSocket connection with the provided `Builder`. It makes
-/// some assumptions about the URI if you do not provide it.  It will use ports
-/// 80 or 443 for `ws` or `wss` respectively.
+/// some assumptions about the request if you do not provide it.  It will use
 ///
 /// It will open the connection and perform the WebSocket handshake. If this
 /// fails, the actor will fail to start with the given reason as a string value.
@@ -123,24 +127,9 @@ type State(state) {
 pub fn initialize(
   builder: Builder(state, user_message),
 ) -> Result(Subject(InternalMessage(user_message)), actor.StartError) {
-  let transport = case builder.uri.scheme {
-    Some("wss") -> Ssl
+  let transport = case builder.request.scheme {
+    Https -> Ssl
     _ -> Tcp
-  }
-  let host = option.unwrap(builder.uri.host, "localhost")
-  let port =
-    option.lazy_unwrap(builder.uri.port, fn() {
-      case transport {
-        Ssl -> 443
-        Tcp -> 80
-      }
-    })
-
-  let origin = case builder.uri.scheme, port {
-    Some("wss"), 443 -> "https://" <> host
-    Some("ws"), 80 -> "http://" <> host
-    Some("wss"), _ -> "https://" <> host <> ":" <> int.to_string(port)
-    _, _ -> "http://" <> host <> ":" <> int.to_string(port)
   }
 
   let timeout = option.unwrap(builder.init_timeout, 5000)
@@ -148,14 +137,7 @@ pub fn initialize(
   actor.start_spec(
     actor.Spec(
       init: fn() {
-        perform_handshake(
-          transport,
-          host,
-          port,
-          builder.uri.path,
-          origin,
-          timeout,
-        )
+        perform_handshake(builder.request, transport, timeout)
         |> result.try(fn(socket) {
           case
             transport.set_opts(
@@ -224,44 +206,88 @@ pub fn initialize(
             actor.Stop(process.Abnormal(string.inspect(reason)))
           }
           Data(bits) -> {
+            // TODO:  Holy shit fix this, it's bonkers
             gramps.frame_from_message(bit_array.append(state.buffer, bits))
             |> result.map(fn(data) {
               let #(parsed_frame, rest) = data
-              let frame = case parsed_frame {
+              case parsed_frame {
                 Complete(DataFrame(TextFrame(payload: data, ..))) -> {
                   let assert Ok(str) = bit_array.to_string(data)
-                  Text(str)
-                }
-                Complete(DataFrame(BinaryFrame(payload: data, ..))) ->
-                  Binary(data)
-                _ -> panic as "Incomplete messages not supported right now"
-              }
-              case builder.loop(frame, state.user_state, conn) {
-                // TODO:  de-dupe this
-                actor.Continue(user_state, user_selector) -> {
-                  let assert Ok(_) =
-                    transport.set_opts(
-                      transport,
-                      state.socket,
-                      socket.convert_options([Receive(Once)]),
-                    )
-                  let new_state =
-                    State(..state, user_state: user_state, buffer: rest)
-                  case user_selector {
-                    Some(user_selector) -> {
-                      let selector =
-                        user_selector
-                        |> process.map_selector(UserMessage)
-                        |> process.merge_selector(process.map_selector(
-                          socket.selector(),
-                          from_socket_message,
-                        ))
-                      actor.Continue(new_state, Some(selector))
+                  case builder.loop(Text(str), state.user_state, conn) {
+                    // TODO:  de-dupe this
+                    actor.Continue(user_state, user_selector) -> {
+                      let assert Ok(_) =
+                        transport.set_opts(
+                          transport,
+                          state.socket,
+                          socket.convert_options([Receive(Once)]),
+                        )
+                      let new_state =
+                        State(..state, user_state: user_state, buffer: rest)
+                      case user_selector {
+                        Some(user_selector) -> {
+                          let selector =
+                            user_selector
+                            |> process.map_selector(UserMessage)
+                            |> process.merge_selector(process.map_selector(
+                              socket.selector(),
+                              from_socket_message,
+                            ))
+                          actor.Continue(new_state, Some(selector))
+                        }
+                        _ -> actor.continue(new_state)
+                      }
                     }
-                    _ -> actor.continue(new_state)
+                    actor.Stop(reason) -> actor.Stop(reason)
                   }
                 }
-                actor.Stop(reason) -> actor.Stop(reason)
+                Complete(DataFrame(BinaryFrame(payload: data, ..))) -> {
+                  case builder.loop(Binary(data), state.user_state, conn) {
+                    // TODO:  de-dupe this
+                    actor.Continue(user_state, user_selector) -> {
+                      let assert Ok(_) =
+                        transport.set_opts(
+                          transport,
+                          state.socket,
+                          socket.convert_options([Receive(Once)]),
+                        )
+                      let new_state =
+                        State(..state, user_state: user_state, buffer: rest)
+                      case user_selector {
+                        Some(user_selector) -> {
+                          let selector =
+                            user_selector
+                            |> process.map_selector(UserMessage)
+                            |> process.merge_selector(process.map_selector(
+                              socket.selector(),
+                              from_socket_message,
+                            ))
+                          actor.Continue(new_state, Some(selector))
+                        }
+                        _ -> actor.continue(new_state)
+                      }
+                    }
+                    actor.Stop(reason) -> actor.Stop(reason)
+                  }
+                }
+                Complete(Control(PingFrame(payload, payload_length))) -> {
+                  let frame =
+                    gramps.frame_to_bytes_builder(
+                      gramps.Control(gramps.PongFrame(payload, payload_length)),
+                      Some(<<>>),
+                    )
+                  let _ = transport.send(conn.transport, conn.socket, frame)
+                  actor.continue(state)
+                }
+                Complete(Control(PongFrame(..))) -> {
+                  actor.continue(state)
+                }
+                Complete(Control(CloseFrame(..))) -> {
+                  builder.on_close(state.user_state)
+                  actor.Stop(process.Normal)
+                }
+                Incomplete(..) | Complete(Continuation(..)) ->
+                  panic as "Incomplete messages not supported right now"
               }
             })
             |> result.lazy_unwrap(fn() {
@@ -337,10 +363,27 @@ pub fn close(conn: Connection) -> Result(Nil, SocketReason) {
   transport.send(conn.transport, conn.socket, frame)
 }
 
-fn make_upgrade(path: String, host: String, origin: String) -> BytesBuilder {
+fn make_upgrade(req: Request(String), origin: String) -> BytesBuilder {
+  let user_headers =
+    req.headers
+    |> list.filter(fn(pair) {
+      let assert #(key, _value) = pair
+      key != "host"
+      && key != "upgrade"
+      && key != "connection"
+      && key != "sec-websocket-key"
+      && key != "sec-websocket-version"
+      && key != "origin"
+    })
+    |> list.map(fn(pair) {
+      let assert #(key, value) = pair
+      key <> ": " <> value
+    })
+    |> string.join("\r\n")
+
   bytes_builder.new()
-  |> bytes_builder.append_string("GET " <> path <> " HTTP/1.1\r\n")
-  |> bytes_builder.append_string("Host: " <> host <> "\r\n")
+  |> bytes_builder.append_string("GET " <> req.path <> " HTTP/1.1\r\n")
+  |> bytes_builder.append_string("Host: " <> req.host <> "\r\n")
   |> bytes_builder.append_string("Upgrade: websocket\r\n")
   |> bytes_builder.append_string("Connection: Upgrade\r\n")
   |> bytes_builder.append_string(
@@ -348,6 +391,7 @@ fn make_upgrade(path: String, host: String, origin: String) -> BytesBuilder {
   )
   |> bytes_builder.append_string("Sec-WebSocket-Version: 13\r\n")
   |> bytes_builder.append_string("Origin: " <> origin <> "\r\n")
+  |> bytes_builder.append_string(user_headers)
   |> bytes_builder.append_string("\r\n")
 }
 
@@ -357,23 +401,45 @@ type HandshakeError {
 }
 
 fn perform_handshake(
+  req: Request(String),
   transport: Transport,
-  host: String,
-  port: Int,
-  path: String,
-  origin: String,
   timeout: Int,
 ) -> Result(Socket, HandshakeError) {
+  let certs = case req.scheme {
+    Https -> {
+      let assert Ok(_ok) = ssl.start()
+      [Cacerts(socket.get_certs())]
+    }
+    Http -> []
+  }
+
   let opts =
-    socket.convert_options(list.append(socket.default_options, [Receive(Pull)]))
+    socket.convert_options(
+      list.append(socket.default_options, [Receive(Pull), ..certs]),
+    )
+
+  let port =
+    option.lazy_unwrap(req.port, fn() {
+      case transport {
+        Ssl -> 443
+        Tcp -> 80
+      }
+    })
+
+  let origin = case req.scheme, port {
+    Https, 443 -> "https://" <> req.host
+    Http, 80 -> "http://" <> req.host
+    Https, _ -> "https://" <> req.host <> ":" <> int.to_string(port)
+    _, _ -> "http://" <> req.host <> ":" <> int.to_string(port)
+  }
 
   use socket <- result.try(result.map_error(
-    transport.connect(transport, charlist.from_string(host), port, opts),
+    transport.connect(transport, charlist.from_string(req.host), port, opts),
     Sock,
   ))
 
   use _nil <- result.try(result.map_error(
-    transport.send(transport, socket, make_upgrade(path, host, origin)),
+    transport.send(transport, socket, make_upgrade(req, origin)),
     Sock,
   ))
 

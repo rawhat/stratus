@@ -21,10 +21,10 @@ gleam add stratus
 ```gleam
 import birl
 import gleam/erlang/process
+import gleam/http/request
 import gleam/io
 import gleam/option.{None}
 import gleam/otp/actor
-import gleam/uri
 import repeatedly
 import stratus
 
@@ -34,10 +34,10 @@ pub type Msg {
 }
 
 pub fn main() {
-  let assert Ok(url) = uri.parse("ws://localhost:3000/ws")
+  let assert Ok(req) = request.to("http://localhost:3000/ws")
   let builder =
     stratus.websocket(
-      uri: url,
+      request: req,
       init: fn() { #(Nil, None) },
       loop: fn(msg, state, conn) {
         case msg {

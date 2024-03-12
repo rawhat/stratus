@@ -1,7 +1,7 @@
 -module(stratus_ffi).
 
 -export([tcp_shutdown/2, tcp_send/2, ssl_shutdown/2, ssl_send/2, tcp_set_opts/2,
-         ssl_set_opts/2]).
+         ssl_set_opts/2, ssl_start/0]).
 
 tcp_shutdown(Socket, How) ->
   case gen_tcp:shutdown(Socket, How) of
@@ -45,6 +45,14 @@ tcp_set_opts(Socket, Opts) ->
 
 ssl_set_opts(Socket, Opts) ->
   case ssl:setopts(Socket, Opts) of
+    ok ->
+      {ok, nil};
+    {error, Reason} ->
+      {error, Reason}
+  end.
+
+ssl_start() ->
+  case ssl:start() of
     ok ->
       {ok, nil};
     {error, Reason} ->

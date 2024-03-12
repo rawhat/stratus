@@ -30,6 +30,7 @@ pub type Options {
   SendTimeoutClose(Bool)
   Reuseaddr(Bool)
   Nodelay(Bool)
+  Cacerts(Dynamic)
 }
 
 pub const default_options = [
@@ -103,3 +104,6 @@ pub fn selector() -> Selector(SocketMessage) {
     Err(dynamic.unsafe_coerce(reason))
   })
 }
+
+@external(erlang, "public_key", "cacerts_get")
+pub fn get_certs() -> Dynamic
