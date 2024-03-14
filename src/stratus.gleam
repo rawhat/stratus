@@ -9,6 +9,7 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
 import gleam/result
+import gleam/uri
 import gleam/string
 import stratus/internal/socket.{
   type Socket, type SocketMessage, type SocketReason, Cacerts, Once, Pull,
@@ -20,6 +21,7 @@ import gramps.{
   type DataFrame, BinaryFrame, CloseFrame, Complete, Continuation, Control,
   Data as DataFrame, Incomplete, PingFrame, PongFrame, TextFrame,
 }
+import logging
 
 /// This holds some information needed to communicate with the WebSocket.
 pub opaque type Connection {
@@ -137,8 +139,14 @@ pub fn initialize(
   actor.start_spec(
     actor.Spec(
       init: fn() {
+        logging.log(
+          logging.Debug,
+          "Attempting handshake to "
+            <> uri.to_string(request.to_uri(builder.request)),
+        )
         perform_handshake(builder.request, transport, timeout)
         |> result.try(fn(socket) {
+          logging.log(logging.Debug, "Handshake successful")
           case
             transport.set_opts(
               transport,
@@ -151,6 +159,7 @@ pub fn initialize(
           }
         })
         |> result.map(fn(socket) {
+          logging.log(logging.Debug, "Calling user initializer")
           let #(user_state, user_selector) = builder.init()
           let selector = case user_selector {
             Some(selector) -> {
@@ -163,6 +172,10 @@ pub fn initialize(
             }
             _ -> process.map_selector(socket.selector(), from_socket_message)
           }
+          logging.log(
+            logging.Debug,
+            "WebSocket process ready to start receiving",
+          )
           actor.Ready(
             State(
               buffer: <<>>,
@@ -381,8 +394,13 @@ fn make_upgrade(req: Request(String), origin: String) -> BytesBuilder {
     })
     |> string.join("\r\n")
 
+  let path = case req.path {
+    "" -> "/"
+    path -> path
+  }
+
   bytes_builder.new()
-  |> bytes_builder.append_string("GET " <> req.path <> " HTTP/1.1\r\n")
+  |> bytes_builder.append_string("GET " <> path <> " HTTP/1.1\r\n")
   |> bytes_builder.append_string("Host: " <> req.host <> "\r\n")
   |> bytes_builder.append_string("Upgrade: websocket\r\n")
   |> bytes_builder.append_string("Connection: Upgrade\r\n")
@@ -433,6 +451,16 @@ fn perform_handshake(
     _, _ -> "http://" <> req.host <> ":" <> int.to_string(port)
   }
 
+  logging.log(
+    logging.Debug,
+    "Making request to "
+      <> req.host
+      <> " at "
+      <> int.to_string(port)
+      <> " with opts: "
+      <> string.inspect(opts),
+  )
+
   use socket <- result.try(result.map_error(
     transport.connect(transport, charlist.from_string(req.host), port, opts),
     Sock,
@@ -442,6 +470,11 @@ fn perform_handshake(
     transport.send(transport, socket, make_upgrade(req, origin)),
     Sock,
   ))
+
+  logging.log(
+    logging.Debug,
+    "Sent upgrade request, waiting " <> int.to_string(timeout),
+  )
 
   use resp <- result.try(result.map_error(
     transport.receive_timeout(transport, socket, 0, timeout),
