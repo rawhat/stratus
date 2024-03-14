@@ -208,9 +208,9 @@ pub fn initialize(
               actor.continue(State(..state, socket: Some(socket)))
             })
             |> result.map_error(fn(err) {
-              actor.Stop(process.Abnormal(
-                "Failed to connect to server: " <> string.inspect(err),
-              ))
+              let msg = "Failed to connect to server: " <> string.inspect(err)
+              logging.log(logging.Error, msg)
+              actor.Stop(process.Abnormal(msg))
             })
             |> result.unwrap_both
           }
