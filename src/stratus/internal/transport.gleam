@@ -16,10 +16,11 @@ pub fn connect(
   host: Charlist,
   port: Int,
   options: List(TcpOption),
+  timeout: Int,
 ) -> Result(Socket, SocketReason) {
   case transport {
-    Ssl -> ssl.connect(host, port, options)
-    Tcp -> tcp.connect(host, port, options)
+    Ssl -> ssl.connect(host, port, options, timeout)
+    Tcp -> tcp.connect(host, port, options, timeout)
   }
 }
 

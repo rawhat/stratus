@@ -66,11 +66,11 @@ pub opaque type Builder(state, user_message) {
   )
 }
 
+//  and `on_close`.
 /// This creates a builder to set up a WebSocket actor. This will use default
 /// values for the connection initialization timeout, and provide an empty
 /// function to be called when the server closes the connection. If you want to
-/// customize either of those, see the helper functions `with_init_timeout` and
-/// `on_close`.
+/// customize either of those, see the helper functions `with_connect_timeout`
 pub fn websocket(
   request req: Request(String),
   init init: fn() -> #(state, Option(Selector(user_message))),
@@ -487,7 +487,13 @@ fn perform_handshake(
   )
 
   use socket <- result.try(result.map_error(
-    transport.connect(transport, charlist.from_string(req.host), port, opts),
+    transport.connect(
+      transport,
+      charlist.from_string(req.host),
+      port,
+      opts,
+      timeout,
+    ),
     Sock,
   ))
 

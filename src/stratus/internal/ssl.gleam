@@ -9,6 +9,7 @@ pub fn connect(
   address: Charlist,
   port: Int,
   options: List(TcpOption),
+  timeout: Int,
 ) -> Result(Socket, SocketReason)
 
 @external(erlang, "stratus_ffi", "ssl_shutdown")
