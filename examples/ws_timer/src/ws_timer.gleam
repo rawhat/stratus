@@ -1,5 +1,6 @@
 import birl
 import gleam/erlang/process
+import gleam/function
 import gleam/http/request
 import gleam/io
 import gleam/option.{None}
@@ -49,9 +50,24 @@ pub fn main() {
       stratus.send_message(subj, SendText(now))
     })
 
-  process.sleep(6000)
+  process.start(
+    fn() {
+      process.sleep(6000)
 
-  stratus.send_message(subj, Close)
+      stratus.send_message(subj, Close)
+    },
+    True,
+  )
+
+  let done =
+    process.new_selector()
+    |> process.selecting_process_down(
+      process.monitor_process(process.subject_owner(subj)),
+      function.identity,
+    )
+    |> process.select_forever
+
+  io.debug(#("WebSocket process exited", done))
 
   repeatedly.stop(timer)
 }
