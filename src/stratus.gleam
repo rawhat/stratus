@@ -2,6 +2,7 @@ import gleam/bytes_builder.{type BytesBuilder}
 import gleam/bit_array
 import gleam/erlang/charlist
 import gleam/erlang/process.{type Selector, type Subject}
+import gleam/function
 import gleam/http/request.{type Request}
 import gleam/http.{Http, Https}
 import gleam/int
@@ -39,6 +40,7 @@ fn from_socket_message(msg: SocketMessage) -> InternalMessage(user_message) {
 /// These are the messages emitted or received by the underlying process.  You
 /// should only need to interact with `Message` below.
 pub opaque type InternalMessage(user_message) {
+  Started
   UserMessage(user_message)
   Err(SocketReason)
   Data(BitArray)
@@ -56,7 +58,7 @@ pub type Message(user_message) {
 pub opaque type Builder(state, user_message) {
   Builder(
     request: Request(String),
-    init_timeout: Option(Int),
+    connect_timeout: Int,
     init: fn() -> #(state, Option(Selector(user_message))),
     loop: fn(Message(user_message), state, Connection) ->
       actor.Next(user_message, state),
@@ -77,21 +79,22 @@ pub fn websocket(
 ) -> Builder(state, user_message) {
   Builder(
     request: req,
-    init_timeout: None,
+    connect_timeout: 5000,
     init: init,
     loop: loop,
     on_close: fn(_state) { Nil },
   )
 }
 
-/// The WebSocket actor will attempt to connect to the server when you call
-/// `initialize`.  It will also call your `init` function.  This timeout serves
-/// as the upper bound for all of these actions.  The default is 5 seconds.
-pub fn with_init_timeout(
+/// This sets the maximum amount of time you are willing to wait for both
+/// connecting to the server and receiving the upgrade response.  This means
+/// that it may take up to `timeout * 2` to begin sending or receiving messages.
+/// This value defaults to 5 seconds.
+pub fn with_connect_timeout(
   builder: Builder(state, user_message),
   timeout: Int,
 ) -> Builder(state, user_message) {
-  Builder(..builder, init_timeout: Some(timeout))
+  Builder(..builder, connect_timeout: timeout)
 }
 
 /// You can provide a function to be called when the connection is closed. This
@@ -111,14 +114,14 @@ type State(state) {
   State(
     buffer: BitArray,
     incomplete: Option(DataFrame),
-    socket: Socket,
+    socket: Option(Socket),
     user_state: state,
   )
 }
 
-//  ports 80 or 443 for `ws` or `wss` respectively.
 /// This opens the WebSocket connection with the provided `Builder`. It makes
 /// some assumptions about the request if you do not provide it.  It will use
+/// ports 80 or 443 for `ws` or `wss` respectively.
 ///
 /// It will open the connection and perform the WebSocket handshake. If this
 /// fails, the actor will fail to start with the given reason as a string value.
@@ -134,66 +137,86 @@ pub fn initialize(
     _ -> Tcp
   }
 
-  let timeout = option.unwrap(builder.init_timeout, 5000)
-
   actor.start_spec(
     actor.Spec(
       init: fn() {
-        logging.log(
-          logging.Debug,
-          "Attempting handshake to "
-            <> uri.to_string(request.to_uri(builder.request)),
+        let subj = process.new_subject()
+        let started_selector =
+          process.selecting(process.new_selector(), subj, function.identity)
+        logging.log(logging.Debug, "Calling user initializer")
+        let #(user_state, user_selector) = builder.init()
+        let selector = case user_selector {
+          Some(selector) -> {
+            selector
+            |> process.map_selector(UserMessage)
+            |> process.merge_selector(started_selector)
+            |> process.merge_selector(process.map_selector(
+              socket.selector(),
+              from_socket_message,
+            ))
+          }
+          _ ->
+            started_selector
+            |> process.merge_selector(process.map_selector(
+              socket.selector(),
+              from_socket_message,
+            ))
+        }
+        process.send(subj, Started)
+        actor.Ready(
+          State(
+            buffer: <<>>,
+            incomplete: None,
+            socket: None,
+            user_state: user_state,
+          ),
+          selector,
         )
-        perform_handshake(builder.request, transport, timeout)
-        |> result.try(fn(socket) {
-          logging.log(logging.Debug, "Handshake successful")
-          case
-            transport.set_opts(
-              transport,
-              socket,
-              socket.convert_options([Receive(Once)]),
-            )
-          {
-            Ok(_) -> Ok(socket)
-            Error(reason) -> Error(Sock(reason))
-          }
-        })
-        |> result.map(fn(socket) {
-          logging.log(logging.Debug, "Calling user initializer")
-          let #(user_state, user_selector) = builder.init()
-          let selector = case user_selector {
-            Some(selector) -> {
-              selector
-              |> process.map_selector(UserMessage)
-              |> process.merge_selector(process.map_selector(
-                socket.selector(),
-                from_socket_message,
-              ))
-            }
-            _ -> process.map_selector(socket.selector(), from_socket_message)
-          }
-          logging.log(
-            logging.Debug,
-            "WebSocket process ready to start receiving",
-          )
-          actor.Ready(
-            State(
-              buffer: <<>>,
-              incomplete: None,
-              socket: socket,
-              user_state: user_state,
-            ),
-            selector,
-          )
-        })
-        |> result.map_error(fn(err) { actor.Failed(string.inspect(err)) })
-        |> result.unwrap_both
       },
-      init_timeout: timeout,
+      init_timeout: 1000,
       loop: fn(msg, state) {
-        let conn = Connection(state.socket, transport: transport)
         case msg {
+          Started -> {
+            logging.log(
+              logging.Debug,
+              "Attempting handshake to "
+                <> uri.to_string(request.to_uri(builder.request)),
+            )
+            perform_handshake(
+              builder.request,
+              transport,
+              builder.connect_timeout,
+            )
+            |> result.try(fn(socket) {
+              logging.log(logging.Debug, "Handshake successful")
+              case
+                transport.set_opts(
+                  transport,
+                  socket,
+                  socket.convert_options([Receive(Once)]),
+                )
+              {
+                Ok(_) -> Ok(socket)
+                Error(reason) -> Error(Sock(reason))
+              }
+            })
+            |> result.map(fn(socket) {
+              logging.log(
+                logging.Debug,
+                "WebSocket process ready to start receiving",
+              )
+              actor.continue(State(..state, socket: Some(socket)))
+            })
+            |> result.map_error(fn(err) {
+              actor.Stop(process.Abnormal(
+                "Failed to connect to server: " <> string.inspect(err),
+              ))
+            })
+            |> result.unwrap_both
+          }
           UserMessage(user_message) -> {
+            let assert Some(socket) = state.socket
+            let conn = Connection(socket, transport)
             case builder.loop(User(user_message), state.user_state, conn) {
               // TODO:  de-dupe this
               actor.Continue(user_state, user_selector) -> {
@@ -219,6 +242,8 @@ pub fn initialize(
             actor.Stop(process.Abnormal(string.inspect(reason)))
           }
           Data(bits) -> {
+            let assert Some(socket) = state.socket
+            let conn = Connection(socket, transport)
             // TODO:  Holy shit fix this, it's bonkers
             gramps.frame_from_message(bit_array.append(state.buffer, bits))
             |> result.map(fn(data) {
@@ -232,7 +257,7 @@ pub fn initialize(
                       let assert Ok(_) =
                         transport.set_opts(
                           transport,
-                          state.socket,
+                          socket,
                           socket.convert_options([Receive(Once)]),
                         )
                       let new_state =
@@ -261,7 +286,7 @@ pub fn initialize(
                       let assert Ok(_) =
                         transport.set_opts(
                           transport,
-                          state.socket,
+                          socket,
                           socket.convert_options([Receive(Once)]),
                         )
                       let new_state =
@@ -307,7 +332,7 @@ pub fn initialize(
               let assert Ok(_) =
                 transport.set_opts(
                   transport,
-                  state.socket,
+                  socket,
                   socket.convert_options([Receive(Once)]),
                 )
               actor.continue(
