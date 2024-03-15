@@ -10,7 +10,7 @@ import stratus
 
 pub type Msg {
   Close
-  SendText(String)
+  TimeUpdated(String)
 }
 
 pub fn main() {
@@ -26,7 +26,7 @@ pub fn main() {
               stratus.send_text_message(conn, "hello, world!")
             actor.continue(state)
           }
-          stratus.User(SendText(msg)) -> {
+          stratus.User(TimeUpdated(msg)) -> {
             let assert Ok(_resp) = stratus.send_text_message(conn, msg)
             actor.continue(state)
           }
@@ -47,7 +47,7 @@ pub fn main() {
       let now =
         birl.now()
         |> birl.to_iso8601
-      stratus.send_message(subj, SendText(now))
+      stratus.send_message(subj, TimeUpdated(now))
     })
 
   process.start(
