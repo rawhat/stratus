@@ -107,3 +107,6 @@ pub fn selector() -> Selector(SocketMessage) {
 
 @external(erlang, "public_key", "cacerts_get")
 pub fn get_certs() -> Dynamic
+
+@external(erlang, "stratus_ffi", "custom_sni_matcher")
+pub fn get_custom_matcher() -> Options

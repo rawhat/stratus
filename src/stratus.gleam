@@ -320,7 +320,15 @@ pub fn initialize(
                 Complete(Control(PongFrame(..))) -> {
                   actor.continue(state)
                 }
-                Complete(Control(CloseFrame(..))) -> {
+                Complete(Control(CloseFrame(length, payload))) -> {
+                  let size = length - 2
+                  case payload {
+                    <<_reason:int-size(2)-unit(8), message:bytes-size(size)>> -> {
+                      let msg = "WebSocket closing: " <> string.inspect(message)
+                      logging.log(logging.Debug, msg)
+                    }
+                    _ -> Nil
+                  }
                   builder.on_close(state.user_state)
                   actor.Stop(process.Normal)
                 }
@@ -451,7 +459,7 @@ fn perform_handshake(
   let certs = case req.scheme {
     Https -> {
       let assert Ok(_ok) = ssl.start()
-      [Cacerts(socket.get_certs())]
+      [Cacerts(socket.get_certs()), socket.get_custom_matcher()]
     }
     Http -> []
   }
