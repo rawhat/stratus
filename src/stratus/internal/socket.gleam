@@ -34,7 +34,6 @@ pub type Options {
 }
 
 pub const default_options = [
-  Receive(Once),
   PacketsOf(Binary),
   SendTimeout(30_000),
   SendTimeoutClose(True),

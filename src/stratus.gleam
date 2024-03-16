@@ -1,5 +1,6 @@
 import gleam/bytes_builder.{type BytesBuilder}
 import gleam/bit_array
+import gleam/crypto
 import gleam/erlang/charlist
 import gleam/erlang/process.{type Selector, type Subject}
 import gleam/function
@@ -19,8 +20,8 @@ import stratus/internal/socket.{
 import stratus/internal/transport.{type Transport, Ssl, Tcp}
 import stratus/internal/ssl
 import gramps.{
-  type DataFrame, BinaryFrame, CloseFrame, Complete, Continuation, Control,
-  Data as DataFrame, Incomplete, PingFrame, PongFrame, TextFrame,
+  type DataFrame, BinaryFrame, CloseFrame, Continuation, Control,
+  Data as DataFrame, PingFrame, PongFrame, TextFrame,
 }
 import logging
 
@@ -110,10 +111,11 @@ pub fn on_close(
   Builder(..builder, on_close: on_close)
 }
 
-type State(state) {
+type State(state, user_message) {
   State(
     buffer: BitArray,
-    incomplete: Option(DataFrame),
+    incomplete: Option(gramps.Frame),
+    self: Subject(InternalMessage(user_message)),
     socket: Option(Socket),
     user_state: state,
   )
@@ -143,7 +145,7 @@ pub fn initialize(
         let subj = process.new_subject()
         let started_selector =
           process.selecting(process.new_selector(), subj, function.identity)
-        logging.log(logging.Debug, "Calling user initializer")
+        logging.log(logging.Info, "Calling user initializer")
         let #(user_state, user_selector) = builder.init()
         let selector = case user_selector {
           Some(selector) -> {
@@ -167,6 +169,7 @@ pub fn initialize(
           State(
             buffer: <<>>,
             incomplete: None,
+            self: subj,
             socket: None,
             user_state: user_state,
           ),
@@ -175,10 +178,11 @@ pub fn initialize(
       },
       init_timeout: 1000,
       loop: fn(msg, state) {
+        logging.log(logging.Info, "got a message: " <> string.inspect(msg))
         case msg {
           Started -> {
             logging.log(
-              logging.Debug,
+              logging.Info,
               "Attempting handshake to "
                 <> uri.to_string(request.to_uri(builder.request)),
             )
@@ -187,25 +191,29 @@ pub fn initialize(
               transport,
               builder.connect_timeout,
             )
-            |> result.try(fn(socket) {
-              logging.log(logging.Debug, "Handshake successful")
-              case
-                transport.set_opts(
-                  transport,
-                  socket,
-                  socket.convert_options([Receive(Once)]),
-                )
-              {
-                Ok(_) -> Ok(socket)
-                Error(reason) -> Error(Sock(reason))
-              }
+            |> result.then(fn(pair) {
+              logging.log(logging.Info, "Handshake successful")
+              transport.set_opts(
+                transport,
+                pair.0,
+                socket.convert_options([Receive(Once)]),
+              )
+              |> result.replace(pair)
+              |> result.map_error(Sock)
             })
-            |> result.map(fn(socket) {
+            |> result.map(fn(pair) {
+              let #(socket, buffer) = pair
               logging.log(
-                logging.Debug,
+                logging.Info,
                 "WebSocket process ready to start receiving",
               )
-              actor.continue(State(..state, socket: Some(socket)))
+              let _ = case buffer {
+                <<>> -> Nil
+                data -> process.send(state.self, Data(data))
+              }
+              actor.continue(
+                State(..state, socket: Some(socket), buffer: buffer),
+              )
             })
             |> result.map_error(fn(err) {
               let msg = "Failed to connect to server: " <> string.inspect(err)
@@ -244,109 +252,37 @@ pub fn initialize(
           Data(bits) -> {
             let assert Some(socket) = state.socket
             let conn = Connection(socket, transport)
-            // TODO:  Holy shit fix this, it's bonkers
-            gramps.frame_from_message(bit_array.append(state.buffer, bits))
-            |> result.map(fn(data) {
-              let #(parsed_frame, rest) = data
-              case parsed_frame {
-                Complete(DataFrame(TextFrame(payload: data, ..))) -> {
-                  let assert Ok(str) = bit_array.to_string(data)
-                  case builder.loop(Text(str), state.user_state, conn) {
-                    // TODO:  de-dupe this
-                    actor.Continue(user_state, user_selector) -> {
-                      let assert Ok(_) =
-                        transport.set_opts(
-                          transport,
-                          socket,
-                          socket.convert_options([Receive(Once)]),
-                        )
-                      let new_state =
-                        State(..state, user_state: user_state, buffer: rest)
-                      case user_selector {
-                        Some(user_selector) -> {
-                          let selector =
-                            user_selector
-                            |> process.map_selector(UserMessage)
-                            |> process.merge_selector(process.map_selector(
-                              socket.selector(),
-                              from_socket_message,
-                            ))
-                          actor.Continue(new_state, Some(selector))
-                        }
-                        _ -> actor.continue(new_state)
-                      }
-                    }
-                    actor.Stop(reason) -> actor.Stop(reason)
+            let #(frames, rest) =
+              gramps.get_messages(bit_array.append(state.buffer, bits), [])
+            let frames = gramps.aggregate_frames(frames, state.incomplete, [])
+            case frames {
+              Error(Nil) -> actor.continue(state)
+              Ok(frames) -> {
+                list.fold_until(frames, actor.continue(state), fn(acc, frame) {
+                  let assert actor.Continue(prev_state, _selector) = acc
+                  case
+                    handle_frame(builder, transport, prev_state, conn, frame)
+                  {
+                    actor.Continue(..) as next -> list.Continue(next)
+                    actor.Stop(..) as err -> list.Stop(err)
                   }
-                }
-                Complete(DataFrame(BinaryFrame(payload: data, ..))) -> {
-                  case builder.loop(Binary(data), state.user_state, conn) {
-                    // TODO:  de-dupe this
-                    actor.Continue(user_state, user_selector) -> {
-                      let assert Ok(_) =
-                        transport.set_opts(
-                          transport,
-                          socket,
-                          socket.convert_options([Receive(Once)]),
-                        )
-                      let new_state =
-                        State(..state, user_state: user_state, buffer: rest)
-                      case user_selector {
-                        Some(user_selector) -> {
-                          let selector =
-                            user_selector
-                            |> process.map_selector(UserMessage)
-                            |> process.merge_selector(process.map_selector(
-                              socket.selector(),
-                              from_socket_message,
-                            ))
-                          actor.Continue(new_state, Some(selector))
-                        }
-                        _ -> actor.continue(new_state)
-                      }
-                    }
-                    actor.Stop(reason) -> actor.Stop(reason)
-                  }
-                }
-                Complete(Control(PingFrame(payload, payload_length))) -> {
-                  let frame =
-                    gramps.frame_to_bytes_builder(
-                      gramps.Control(gramps.PongFrame(payload, payload_length)),
-                      Some(<<>>),
-                    )
-                  let _ = transport.send(conn.transport, conn.socket, frame)
-                  actor.continue(state)
-                }
-                Complete(Control(PongFrame(..))) -> {
-                  actor.continue(state)
-                }
-                Complete(Control(CloseFrame(length, payload))) -> {
-                  let size = length - 2
-                  case payload {
-                    <<_reason:int-size(2)-unit(8), message:bytes-size(size)>> -> {
-                      let msg = "WebSocket closing: " <> string.inspect(message)
-                      logging.log(logging.Debug, msg)
-                    }
-                    _ -> Nil
-                  }
-                  builder.on_close(state.user_state)
-                  actor.Stop(process.Normal)
-                }
-                Incomplete(..) | Complete(Continuation(..)) ->
-                  panic as "Incomplete messages not supported right now"
+                })
               }
-            })
-            |> result.lazy_unwrap(fn() {
-              let assert Ok(_) =
-                transport.set_opts(
-                  transport,
-                  socket,
-                  socket.convert_options([Receive(Once)]),
-                )
-              actor.continue(
-                State(..state, buffer: bit_array.append(state.buffer, bits)),
-              )
-            })
+            }
+            |> fn(next) {
+              case next {
+                actor.Stop(..) as stop -> stop
+                actor.Continue(state, selector) -> {
+                  let assert Ok(_) =
+                    transport.set_opts(
+                      transport,
+                      socket,
+                      socket.convert_options([Receive(Once)]),
+                    )
+                  actor.Continue(State(..state, buffer: rest), selector)
+                }
+              }
+            }
           }
           Closed -> {
             builder.on_close(state.user_state)
@@ -360,6 +296,90 @@ pub fn initialize(
       },
     ),
   )
+}
+
+fn handle_frame(
+  builder: Builder(user_state, user_message),
+  transport: Transport,
+  state: State(user_state, user_message),
+  conn: Connection,
+  frame: gramps.Frame,
+) -> actor.Next(InternalMessage(user_message), State(user_state, user_message)) {
+  let assert Some(socket) = state.socket
+  case frame {
+    DataFrame(TextFrame(payload: data, ..)) -> {
+      let assert Ok(str) = bit_array.to_string(data)
+      case builder.loop(Text(str), state.user_state, conn) {
+        // TODO:  de-dupe this
+        actor.Continue(user_state, user_selector) -> {
+          let new_state = State(..state, user_state: user_state)
+          case user_selector {
+            Some(user_selector) -> {
+              let selector =
+                user_selector
+                |> process.map_selector(UserMessage)
+                |> process.merge_selector(process.map_selector(
+                  socket.selector(),
+                  from_socket_message,
+                ))
+              actor.Continue(new_state, Some(selector))
+            }
+            _ -> actor.continue(new_state)
+          }
+        }
+        actor.Stop(reason) -> actor.Stop(reason)
+      }
+    }
+    DataFrame(BinaryFrame(payload: data, ..)) -> {
+      case builder.loop(Binary(data), state.user_state, conn) {
+        // TODO:  de-dupe this
+        actor.Continue(user_state, user_selector) -> {
+          let new_state = State(..state, user_state: user_state)
+          case user_selector {
+            Some(user_selector) -> {
+              let selector =
+                user_selector
+                |> process.map_selector(UserMessage)
+                |> process.merge_selector(process.map_selector(
+                  socket.selector(),
+                  from_socket_message,
+                ))
+              actor.Continue(new_state, Some(selector))
+            }
+            _ -> actor.continue(new_state)
+          }
+        }
+        actor.Stop(reason) -> actor.Stop(reason)
+      }
+    }
+    Control(PingFrame(payload, payload_length)) -> {
+      let frame =
+        gramps.frame_to_bytes_builder(
+          gramps.Control(gramps.PongFrame(payload, payload_length)),
+          Some(<<0:unit(8)-size(4)>>),
+        )
+      let _ = transport.send(conn.transport, conn.socket, frame)
+      actor.continue(state)
+    }
+    Control(PongFrame(..)) -> {
+      actor.continue(state)
+    }
+    Control(CloseFrame(length, payload)) -> {
+      let size = length - 2
+      case payload {
+        <<_reason:int-size(2)-unit(8), message:bytes-size(size)>> -> {
+          let msg = "WebSocket closing: " <> string.inspect(message)
+          logging.log(logging.Info, msg)
+        }
+        _ -> Nil
+      }
+      builder.on_close(state.user_state)
+      actor.Stop(process.Normal)
+    }
+    Continuation(..) -> {
+      actor.continue(state)
+    }
+  }
 }
 
 /// Since the actor receives the raw data from the WebSocket, it needs a less
@@ -404,7 +424,7 @@ pub fn close(conn: Connection) -> Result(Nil, SocketReason) {
   let frame =
     gramps.frame_to_bytes_builder(
       gramps.Control(gramps.CloseFrame(0, <<>>)),
-      Some(<<>>),
+      Some(crypto.strong_random_bytes(32)),
     )
   transport.send(conn.transport, conn.socket, frame)
 }
@@ -455,7 +475,7 @@ fn perform_handshake(
   req: Request(String),
   transport: Transport,
   timeout: Int,
-) -> Result(Socket, HandshakeError) {
+) -> Result(#(Socket, BitArray), HandshakeError) {
   let certs = case req.scheme {
     Https -> {
       let assert Ok(_ok) = ssl.start()
@@ -485,13 +505,8 @@ fn perform_handshake(
   }
 
   logging.log(
-    logging.Debug,
-    "Making request to "
-      <> req.host
-      <> " at "
-      <> int.to_string(port)
-      <> " with opts: "
-      <> string.inspect(opts),
+    logging.Info,
+    "Making request to " <> req.host <> " at " <> int.to_string(port),
   )
 
   use socket <- result.try(result.map_error(
@@ -511,7 +526,7 @@ fn perform_handshake(
   ))
 
   logging.log(
-    logging.Debug,
+    logging.Info,
     "Sent upgrade request, waiting " <> int.to_string(timeout),
   )
 
@@ -520,8 +535,10 @@ fn perform_handshake(
     Sock,
   ))
 
-  case resp {
-    <<"HTTP/1.1 101 Switching Protocols":utf8, _rest:bits>> -> Ok(socket)
-    _ -> Error(Protocol(resp))
+  case gramps.read_response(resp) {
+    Ok(#(_resp, rest)) -> {
+      Ok(#(socket, rest))
+    }
+    Error(_reason) -> Error(Protocol(resp))
   }
 }
