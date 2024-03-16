@@ -145,7 +145,7 @@ pub fn initialize(
         let subj = process.new_subject()
         let started_selector =
           process.selecting(process.new_selector(), subj, function.identity)
-        logging.log(logging.Info, "Calling user initializer")
+        logging.log(logging.Debug, "Calling user initializer")
         let #(user_state, user_selector) = builder.init()
         let selector = case user_selector {
           Some(selector) -> {
@@ -178,11 +178,11 @@ pub fn initialize(
       },
       init_timeout: 1000,
       loop: fn(msg, state) {
-        logging.log(logging.Info, "got a message: " <> string.inspect(msg))
+        logging.log(logging.Debug, "got a message: " <> string.inspect(msg))
         case msg {
           Started -> {
             logging.log(
-              logging.Info,
+              logging.Debug,
               "Attempting handshake to "
                 <> uri.to_string(request.to_uri(builder.request)),
             )
@@ -192,7 +192,7 @@ pub fn initialize(
               builder.connect_timeout,
             )
             |> result.then(fn(pair) {
-              logging.log(logging.Info, "Handshake successful")
+              logging.log(logging.Debug, "Handshake successful")
               transport.set_opts(
                 transport,
                 pair.0,
@@ -204,7 +204,7 @@ pub fn initialize(
             |> result.map(fn(pair) {
               let #(socket, buffer) = pair
               logging.log(
-                logging.Info,
+                logging.Debug,
                 "WebSocket process ready to start receiving",
               )
               let _ = case buffer {
@@ -369,7 +369,7 @@ fn handle_frame(
       case payload {
         <<_reason:int-size(2)-unit(8), message:bytes-size(size)>> -> {
           let msg = "WebSocket closing: " <> string.inspect(message)
-          logging.log(logging.Info, msg)
+          logging.log(logging.Debug, msg)
         }
         _ -> Nil
       }
@@ -419,12 +419,27 @@ pub fn send_binary_message(
   transport.send(conn.transport, conn.socket, frame)
 }
 
+/// Send a ping frame with some data.
+pub fn send_ping(conn: Connection, data: BitArray) -> Result(Nil, SocketReason) {
+  let size = bit_array.byte_size(data)
+  let mask = case size {
+    0 -> <<0:size(4)>>
+    _n -> crypto.strong_random_bytes(4)
+  }
+  let frame =
+    gramps.frame_to_bytes_builder(
+      gramps.Control(gramps.PingFrame(size, data)),
+      Some(mask),
+    )
+  transport.send(conn.transport, conn.socket, frame)
+}
+
 /// This will close the WebSocket connection.
 pub fn close(conn: Connection) -> Result(Nil, SocketReason) {
   let frame =
     gramps.frame_to_bytes_builder(
       gramps.Control(gramps.CloseFrame(0, <<>>)),
-      Some(crypto.strong_random_bytes(32)),
+      Some(crypto.strong_random_bytes(4)),
     )
   transport.send(conn.transport, conn.socket, frame)
 }
@@ -505,7 +520,7 @@ fn perform_handshake(
   }
 
   logging.log(
-    logging.Info,
+    logging.Debug,
     "Making request to " <> req.host <> " at " <> int.to_string(port),
   )
 
@@ -526,7 +541,7 @@ fn perform_handshake(
   ))
 
   logging.log(
-    logging.Info,
+    logging.Debug,
     "Sent upgrade request, waiting " <> int.to_string(timeout),
   )
 
