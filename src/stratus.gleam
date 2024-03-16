@@ -178,7 +178,6 @@ pub fn initialize(
       },
       init_timeout: 1000,
       loop: fn(msg, state) {
-        logging.log(logging.Debug, "got a message: " <> string.inspect(msg))
         case msg {
           Started -> {
             logging.log(
@@ -285,11 +284,13 @@ pub fn initialize(
             }
           }
           Closed -> {
+            logging.log(logging.Debug, "Received closed frame")
             builder.on_close(state.user_state)
             actor.Stop(process.Normal)
           }
           // TODO:  handle shutdown better?
           Shutdown -> {
+            logging.log(logging.Debug, "Received shutdown messag")
             actor.Stop(process.Normal)
           }
         }
