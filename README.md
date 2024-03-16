@@ -26,6 +26,7 @@ import gleam/http/request
 import gleam/io
 import gleam/option.{None}
 import gleam/otp/actor
+import logging
 import repeatedly
 import stratus
 
@@ -34,7 +35,22 @@ pub type Msg {
   TimeUpdated(String)
 }
 
+pub type LogLevel {
+  Debug
+}
+
+pub type Log {
+  Level
+}
+
+@external(erlang, "logger", "set_primary_config")
+fn set_logger_level(log: Log, level: LogLevel) -> Nil
+
 pub fn main() {
+  logging.configure()
+  // NOTE:  This isn't strictly necessary at all (including the associated
+  // stuff above). It's included just to show the debug logging.
+  set_logger_level(Level, Debug)
   let assert Ok(req) = request.to("http://localhost:3000/ws")
   let builder =
     stratus.websocket(
