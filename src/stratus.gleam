@@ -1,6 +1,7 @@
 import gleam/bytes_builder.{type BytesBuilder}
 import gleam/bit_array
 import gleam/crypto
+import gleam/erlang.{rescue}
 import gleam/erlang/charlist
 import gleam/erlang/process.{type Selector, type Subject}
 import gleam/function
@@ -224,9 +225,13 @@ pub fn initialize(
           UserMessage(user_message) -> {
             let assert Some(socket) = state.socket
             let conn = Connection(socket, transport)
-            case builder.loop(User(user_message), state.user_state, conn) {
+            let res =
+              rescue(fn() {
+                builder.loop(User(user_message), state.user_state, conn)
+              })
+            case res {
               // TODO:  de-dupe this
-              actor.Continue(user_state, user_selector) -> {
+              Ok(actor.Continue(user_state, user_selector)) -> {
                 let new_state = State(..state, user_state: user_state)
                 case user_selector {
                   Some(user_selector) -> {
@@ -242,7 +247,14 @@ pub fn initialize(
                   _ -> actor.continue(new_state)
                 }
               }
-              actor.Stop(reason) -> actor.Stop(reason)
+              Ok(actor.Stop(reason)) -> actor.Stop(reason)
+              Error(reason) -> {
+                logging.log(
+                  logging.Error,
+                  "Caught error in user handler: " <> string.inspect(reason),
+                )
+                actor.continue(state)
+              }
             }
           }
           Err(reason) -> {
@@ -310,9 +322,10 @@ fn handle_frame(
   case frame {
     DataFrame(TextFrame(payload: data, ..)) -> {
       let assert Ok(str) = bit_array.to_string(data)
-      case builder.loop(Text(str), state.user_state, conn) {
+      let res = rescue(fn() { builder.loop(Text(str), state.user_state, conn) })
+      case res {
         // TODO:  de-dupe this
-        actor.Continue(user_state, user_selector) -> {
+        Ok(actor.Continue(user_state, user_selector)) -> {
           let new_state = State(..state, user_state: user_state)
           case user_selector {
             Some(user_selector) -> {
@@ -328,13 +341,22 @@ fn handle_frame(
             _ -> actor.continue(new_state)
           }
         }
-        actor.Stop(reason) -> actor.Stop(reason)
+        Ok(actor.Stop(reason)) -> actor.Stop(reason)
+        Error(reason) -> {
+          logging.log(
+            logging.Error,
+            "Caught error in user handler: " <> string.inspect(reason),
+          )
+          actor.continue(state)
+        }
       }
     }
     DataFrame(BinaryFrame(payload: data, ..)) -> {
-      case builder.loop(Binary(data), state.user_state, conn) {
+      let res =
+        rescue(fn() { builder.loop(Binary(data), state.user_state, conn) })
+      case res {
         // TODO:  de-dupe this
-        actor.Continue(user_state, user_selector) -> {
+        Ok(actor.Continue(user_state, user_selector)) -> {
           let new_state = State(..state, user_state: user_state)
           case user_selector {
             Some(user_selector) -> {
@@ -350,7 +372,14 @@ fn handle_frame(
             _ -> actor.continue(new_state)
           }
         }
-        actor.Stop(reason) -> actor.Stop(reason)
+        Ok(actor.Stop(reason)) -> actor.Stop(reason)
+        Error(reason) -> {
+          logging.log(
+            logging.Error,
+            "Caught error in user handler: " <> string.inspect(reason),
+          )
+          actor.continue(state)
+        }
       }
     }
     Control(PingFrame(payload, payload_length)) -> {
