@@ -1,30 +1,30 @@
-import gleam/bytes_builder.{type BytesBuilder}
 import gleam/bit_array
+import gleam/bytes_builder.{type BytesBuilder}
 import gleam/crypto
 import gleam/erlang.{rescue}
 import gleam/erlang/charlist
 import gleam/erlang/process.{type Selector, type Subject}
 import gleam/function
-import gleam/http/request.{type Request}
 import gleam/http.{Http, Https}
+import gleam/http/request.{type Request}
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
 import gleam/result
-import gleam/uri
 import gleam/string
-import stratus/internal/socket.{
-  type Socket, type SocketMessage, type SocketReason, Cacerts, Once, Pull,
-  Receive,
-}
-import stratus/internal/transport.{type Transport, Ssl, Tcp}
-import stratus/internal/ssl
+import gleam/uri
 import gramps.{
   type DataFrame, BinaryFrame, CloseFrame, Continuation, Control,
   Data as DataFrame, PingFrame, PongFrame, TextFrame,
 }
 import logging
+import stratus/internal/socket.{
+  type Socket, type SocketMessage, type SocketReason, Cacerts, Once, Pull,
+  Receive,
+}
+import stratus/internal/ssl
+import stratus/internal/transport.{type Transport, Ssl, Tcp}
 
 /// This holds some information needed to communicate with the WebSocket.
 pub opaque type Connection {
@@ -497,8 +497,20 @@ fn make_upgrade(req: Request(String), origin: String) -> BytesBuilder {
     path -> path
   }
 
+  let query =
+    req
+    |> request.get_query
+    |> result.map(uri.query_to_string)
+    |> fn(str) {
+      case str {
+        Ok("") -> ""
+        Ok(str) -> "?" <> str
+        _ -> ""
+      }
+    }
+
   bytes_builder.new()
-  |> bytes_builder.append_string("GET " <> path <> " HTTP/1.1\r\n")
+  |> bytes_builder.append_string("GET " <> path <> query <> " HTTP/1.1\r\n")
   |> bytes_builder.append_string("Host: " <> req.host <> "\r\n")
   |> bytes_builder.append_string("Upgrade: websocket\r\n")
   |> bytes_builder.append_string("Connection: Upgrade\r\n")

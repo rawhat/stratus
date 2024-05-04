@@ -5,6 +5,7 @@ import gleam/http/request
 import gleam/io
 import gleam/option.{None}
 import gleam/otp/actor
+import gleam/string
 import logging
 import repeatedly
 import stratus
@@ -28,7 +29,8 @@ fn set_logger_level(log: Log, level: LogLevel) -> Nil
 pub fn main() {
   logging.configure()
   set_logger_level(Level, Debug)
-  let assert Ok(req) = request.to("http://localhost:3000/ws")
+  let assert Ok(req) =
+    request.to("http://localhost:3000/ws?hello=world&value=123")
   let builder =
     stratus.websocket(
       request: req,
@@ -81,7 +83,10 @@ pub fn main() {
     )
     |> process.select_forever
 
-  io.debug(#("WebSocket process exited", done))
+  logging.log(
+    logging.Info,
+    "WebSocket process exited: " <> string.inspect(done),
+  )
 
   repeatedly.stop(timer)
 }
