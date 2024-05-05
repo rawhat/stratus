@@ -3,8 +3,8 @@ import gleam/erlang/charlist.{type Charlist}
 import stratus/internal/socket.{
   type Shutdown, type Socket, type SocketReason, type TcpOption,
 }
-import stratus/internal/tcp
 import stratus/internal/ssl
+import stratus/internal/tcp
 
 pub type Transport {
   Tcp
