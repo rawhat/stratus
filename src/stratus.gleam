@@ -7,6 +7,7 @@ import gleam/erlang/process.{type Selector, type Subject}
 import gleam/function
 import gleam/http.{Http, Https}
 import gleam/http/request.{type Request}
+import gleam/http/response.{type Response, Response}
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -65,6 +66,7 @@ pub opaque type Builder(state, user_message) {
     loop: fn(Message(user_message), state, Connection) ->
       actor.Next(user_message, state),
     on_close: fn(state) -> Nil,
+    on_handshake_error: fn(Response(BitArray)) -> Nil,
   )
 }
 
@@ -85,6 +87,7 @@ pub fn websocket(
     init: init,
     loop: loop,
     on_close: fn(_state) { Nil },
+    on_handshake_error: fn(_resp) { Nil },
   )
 }
 
@@ -110,6 +113,15 @@ pub fn on_close(
   on_close: fn(state) -> Nil,
 ) -> Builder(state, user_message) {
   Builder(..builder, on_close: on_close)
+}
+
+/// If the WebSocket handshake fails, this method will be called with the
+/// response received from the server. The process will stop after this.
+pub fn on_handshake_error(
+  builder: Builder(state, user_message),
+  on_handshake_error: fn(Response(BitArray)) -> Nil,
+) -> Builder(state, user_message) {
+  Builder(..builder, on_handshake_error: on_handshake_error)
 }
 
 type State(state, user_message) {
@@ -202,7 +214,7 @@ pub fn initialize(
               |> result.map_error(Sock)
             })
             |> result.map(fn(pair) {
-              let #(socket, buffer) = pair
+              let #(socket, _resp, buffer) = pair
               logging.log(
                 logging.Debug,
                 "WebSocket process ready to start receiving",
@@ -216,9 +228,23 @@ pub fn initialize(
               )
             })
             |> result.map_error(fn(err) {
-              let msg = "Failed to connect to server: " <> string.inspect(err)
-              logging.log(logging.Error, msg)
-              actor.Stop(process.Abnormal(msg))
+              case err {
+                Protocol(_bits) | Sock(_reason) -> {
+                  let msg =
+                    "Failed to connect to server: " <> string.inspect(err)
+                  logging.log(logging.Error, msg)
+                  actor.Stop(process.Abnormal(msg))
+                }
+                UpgradeFailed(resp) -> {
+                  builder.on_handshake_error(resp)
+                  logging.log(
+                    logging.Error,
+                    "WebSocket handshake failed with status "
+                      <> int.to_string(resp.status),
+                  )
+                  actor.Stop(process.Abnormal("WebSocket handshake failed"))
+                }
+              }
             })
             |> result.unwrap_both
           }
@@ -478,7 +504,7 @@ fn make_upgrade(req: Request(String), origin: String) -> BytesBuilder {
   let user_headers =
     req.headers
     |> list.filter(fn(pair) {
-      let assert #(key, _value) = pair
+      let #(key, _value) = pair
       key != "host"
       && key != "upgrade"
       && key != "connection"
@@ -487,7 +513,7 @@ fn make_upgrade(req: Request(String), origin: String) -> BytesBuilder {
       && key != "origin"
     })
     |> list.map(fn(pair) {
-      let assert #(key, value) = pair
+      let #(key, value) = pair
       key <> ": " <> value
     })
     |> string.join("\r\n")
@@ -526,13 +552,14 @@ fn make_upgrade(req: Request(String), origin: String) -> BytesBuilder {
 type HandshakeError {
   Sock(SocketReason)
   Protocol(BitArray)
+  UpgradeFailed(Response(BitArray))
 }
 
 fn perform_handshake(
   req: Request(String),
   transport: Transport,
   timeout: Int,
-) -> Result(#(Socket, BitArray), HandshakeError) {
+) -> Result(#(Socket, Response(BitArray), BitArray), HandshakeError) {
   let certs = case req.scheme {
     Https -> {
       let assert Ok(_ok) = ssl.start()
@@ -592,10 +619,48 @@ fn perform_handshake(
     Sock,
   ))
 
-  case gramps.read_response(resp) {
-    Ok(#(_resp, rest)) -> {
-      Ok(#(socket, rest))
+  resp
+  |> gramps.read_response
+  |> result.map_error(fn(_err) { Protocol(resp) })
+  |> result.then(fn(pair) {
+    let #(resp, body) = pair
+    let body_size =
+      resp.headers
+      |> list.key_find("content-length")
+      |> result.then(int.parse)
+      |> result.unwrap(0)
+    case read_body(transport, socket, timeout, body_size, body) {
+      Ok(#(body, rest)) -> {
+        Ok(#(response.set_body(resp, body), rest))
+      }
+      Error(reason) -> Error(Sock(reason))
     }
-    Error(_reason) -> Error(Protocol(resp))
+  })
+  |> result.then(fn(pair) {
+    let #(resp, rest) = pair
+    case resp.status {
+      101 -> Ok(#(socket, resp, rest))
+      _ -> Error(UpgradeFailed(resp))
+    }
+  })
+}
+
+fn read_body(
+  transport: Transport,
+  socket: Socket,
+  timeout: Int,
+  length: Int,
+  body: BitArray,
+) -> Result(#(BitArray, BitArray), SocketReason) {
+  case body {
+    <<data:bytes-size(length), rest:bits>> -> Ok(#(data, rest))
+    _ -> {
+      case transport.receive_timeout(transport, socket, 0, timeout) {
+        Ok(data) -> {
+          read_body(transport, socket, timeout, length, <<body:bits, data:bits>>)
+        }
+        Error(reason) -> Error(reason)
+      }
+    }
   }
 }
