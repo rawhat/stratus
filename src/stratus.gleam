@@ -15,7 +15,8 @@ import gleam/otp/actor
 import gleam/result
 import gleam/string
 import gleam/uri
-import gramps.{
+import gramps/http as gramps_http
+import gramps/websocket.{
   type DataFrame, BinaryFrame, CloseFrame, Continuation, Control,
   Data as DataFrame, PingFrame, PongFrame, TextFrame,
 }
@@ -127,7 +128,7 @@ pub fn on_handshake_error(
 type State(state, user_message) {
   State(
     buffer: BitArray,
-    incomplete: Option(gramps.Frame),
+    incomplete: Option(websocket.Frame),
     self: Subject(InternalMessage(user_message)),
     socket: Option(Socket),
     user_state: state,
@@ -290,8 +291,13 @@ pub fn initialize(
             let assert Some(socket) = state.socket
             let conn = Connection(socket, transport)
             let #(frames, rest) =
-              gramps.get_messages(bit_array.append(state.buffer, bits), [])
-            let frames = gramps.aggregate_frames(frames, state.incomplete, [])
+              websocket.get_messages(
+                bit_array.append(state.buffer, bits),
+                [],
+                None,
+              )
+            let frames =
+              websocket.aggregate_frames(frames, state.incomplete, [])
             case frames {
               Error(Nil) -> actor.continue(state)
               Ok(frames) -> {
@@ -342,7 +348,7 @@ fn handle_frame(
   transport: Transport,
   state: State(user_state, user_message),
   conn: Connection,
-  frame: gramps.Frame,
+  frame: websocket.Frame,
 ) -> actor.Next(InternalMessage(user_message), State(user_state, user_message)) {
   let assert Some(socket) = state.socket
   case frame {
@@ -410,8 +416,8 @@ fn handle_frame(
     }
     Control(PingFrame(payload, payload_length)) -> {
       let frame =
-        gramps.frame_to_bytes_builder(
-          gramps.Control(gramps.PongFrame(payload, payload_length)),
+        websocket.frame_to_bytes_builder(
+          websocket.Control(websocket.PongFrame(payload, payload_length)),
           Some(<<0:unit(8)-size(4)>>),
         )
       let _ = transport.send(conn.transport, conn.socket, frame)
@@ -462,7 +468,8 @@ pub fn send_text_message(
   conn: Connection,
   msg: String,
 ) -> Result(Nil, SocketReason) {
-  let frame = gramps.to_text_frame(msg, True)
+  let frame =
+    websocket.to_text_frame(msg, None, Some(crypto.strong_random_bytes(4)))
   transport.send(conn.transport, conn.socket, frame)
 }
 
@@ -471,7 +478,8 @@ pub fn send_binary_message(
   conn: Connection,
   msg: BitArray,
 ) -> Result(Nil, SocketReason) {
-  let frame = gramps.to_binary_frame(msg, True)
+  let frame =
+    websocket.to_binary_frame(msg, None, Some(crypto.strong_random_bytes(4)))
   transport.send(conn.transport, conn.socket, frame)
 }
 
@@ -483,8 +491,8 @@ pub fn send_ping(conn: Connection, data: BitArray) -> Result(Nil, SocketReason) 
     _n -> crypto.strong_random_bytes(4)
   }
   let frame =
-    gramps.frame_to_bytes_builder(
-      gramps.Control(gramps.PingFrame(size, data)),
+    websocket.frame_to_bytes_builder(
+      websocket.Control(websocket.PingFrame(size, data)),
       Some(mask),
     )
   transport.send(conn.transport, conn.socket, frame)
@@ -493,8 +501,8 @@ pub fn send_ping(conn: Connection, data: BitArray) -> Result(Nil, SocketReason) 
 /// This will close the WebSocket connection.
 pub fn close(conn: Connection) -> Result(Nil, SocketReason) {
   let frame =
-    gramps.frame_to_bytes_builder(
-      gramps.Control(gramps.CloseFrame(0, <<>>)),
+    websocket.frame_to_bytes_builder(
+      websocket.Control(websocket.CloseFrame(0, <<>>)),
       Some(crypto.strong_random_bytes(4)),
     )
   transport.send(conn.transport, conn.socket, frame)
@@ -541,7 +549,7 @@ fn make_upgrade(req: Request(String), origin: String) -> BytesBuilder {
   |> bytes_builder.append_string("Upgrade: websocket\r\n")
   |> bytes_builder.append_string("Connection: Upgrade\r\n")
   |> bytes_builder.append_string(
-    "Sec-WebSocket-Key: " <> gramps.websocket_client_key <> "\r\n",
+    "Sec-WebSocket-Key: " <> websocket.client_key <> "\r\n",
   )
   |> bytes_builder.append_string("Sec-WebSocket-Version: 13\r\n")
   |> bytes_builder.append_string("Origin: " <> origin <> "\r\n")
@@ -620,7 +628,7 @@ fn perform_handshake(
   ))
 
   resp
-  |> gramps.read_response
+  |> gramps_http.read_response
   |> result.map_error(fn(_err) { Protocol(resp) })
   |> result.then(fn(pair) {
     let #(resp, body) = pair
