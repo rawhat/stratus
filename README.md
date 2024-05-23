@@ -13,7 +13,7 @@ gleam add stratus
 - [x] Sending and receiving Text and Binary frames
 - [x] Custom user messages
 - [ ] Sending and receiving continuation frames
-- [ ] Per-message deflate
+- [x] Per-message deflate
 - [ ] Graceful shutdown
 
 ## Example
