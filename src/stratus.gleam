@@ -230,7 +230,8 @@ pub fn initialize(
             })
             |> result.map_error(fn(err) {
               case err {
-                Protocol(_bits) | Sock(_reason) -> {
+                Protocol(_bits)
+                | Sock(_reason) -> {
                   let msg =
                     "Failed to connect to server: " <> string.inspect(err)
                   logging.log(logging.Error, msg)
@@ -545,14 +546,17 @@ fn make_upgrade(req: Request(String), origin: String) -> BytesBuilder {
 
   bytes_builder.new()
   |> bytes_builder.append_string("GET " <> path <> query <> " HTTP/1.1\r\n")
-  |> bytes_builder.append_string("Host: " <> req.host <> "\r\n")
-  |> bytes_builder.append_string("Upgrade: websocket\r\n")
-  |> bytes_builder.append_string("Connection: Upgrade\r\n")
+  |> bytes_builder.append_string("host: " <> req.host <> "\r\n")
+  |> bytes_builder.append_string("upgrade: websocket\r\n")
+  |> bytes_builder.append_string("connection: Upgrade\r\n")
   |> bytes_builder.append_string(
-    "Sec-WebSocket-Key: " <> websocket.client_key <> "\r\n",
+    "sec-websocket-key: " <> websocket.client_key <> "\r\n",
   )
-  |> bytes_builder.append_string("Sec-WebSocket-Version: 13\r\n")
-  |> bytes_builder.append_string("Origin: " <> origin <> "\r\n")
+  |> bytes_builder.append_string("sec-websocket-version: 13\r\n")
+  |> bytes_builder.append_string("origin: " <> origin <> "\r\n")
+  |> bytes_builder.append_string(
+    "sec-websocket-extensions: permessage-deflate\r\n",
+  )
   |> bytes_builder.append_string(user_headers)
   |> bytes_builder.append_string("\r\n")
 }
