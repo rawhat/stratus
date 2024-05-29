@@ -37,9 +37,8 @@ pub fn main() {
       init: fn() { #(Nil, None) },
       loop: fn(msg, state, conn) {
         case msg {
-          stratus.Text(_msg) -> {
-            let assert Ok(_resp) =
-              stratus.send_text_message(conn, "hello, world!")
+          stratus.Text(msg) -> {
+            logging.log(logging.Info, "Got a message: " <> msg)
             actor.continue(state)
           }
           stratus.User(TimeUpdated(msg)) -> {

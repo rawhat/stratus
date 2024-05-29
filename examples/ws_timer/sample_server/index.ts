@@ -7,10 +7,12 @@ Bun.serve({
     return new Response("Upgrade failed", { status: 500 })
   },
   websocket: {
-    message(_ws, message) {
+    message(ws, message) {
+      ws.send("ok")
       console.log("Received message", message)
     },
-    open(_ws) {
+    open(ws) {
+      ws.send("opened!")
       console.log("WebSocket opened!")
     },
     close(_ws, code, message) {

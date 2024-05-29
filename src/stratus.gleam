@@ -20,6 +20,7 @@ import gramps/websocket.{
   type DataFrame, BinaryFrame, CloseFrame, Continuation, Control,
   Data as DataFrame, PingFrame, PongFrame, TextFrame,
 }
+import gramps/websocket/compression
 import logging
 import stratus/internal/socket.{
   type Socket, type SocketMessage, type SocketReason, Cacerts, Once, Pull,
@@ -30,13 +31,17 @@ import stratus/internal/transport.{type Transport, Ssl, Tcp}
 
 /// This holds some information needed to communicate with the WebSocket.
 pub opaque type Connection {
-  Connection(socket: Socket, transport: Transport)
+  Connection(
+    socket: Socket,
+    transport: Transport,
+    context: Option(compression.Context),
+  )
 }
 
 fn from_socket_message(msg: SocketMessage) -> InternalMessage(user_message) {
   case msg {
     socket.Data(bits) -> Data(bits)
-    socket.Closed -> Closed
+    socket.Err(socket.Closed) -> Closed
     socket.Err(reason) -> Err(reason)
   }
 }
@@ -132,6 +137,7 @@ type State(state, user_message) {
     self: Subject(InternalMessage(user_message)),
     socket: Option(Socket),
     user_state: state,
+    compression: Option(compression.Compression),
   )
 }
 
@@ -186,6 +192,7 @@ pub fn initialize(
             self: subj,
             socket: None,
             user_state: user_state,
+            compression: None,
           ),
           selector,
         )
@@ -215,7 +222,7 @@ pub fn initialize(
               |> result.map_error(Sock)
             })
             |> result.map(fn(pair) {
-              let #(socket, _resp, buffer) = pair
+              let #(socket, resp, buffer) = pair
               logging.log(
                 logging.Debug,
                 "WebSocket process ready to start receiving",
@@ -224,14 +231,27 @@ pub fn initialize(
                 <<>> -> Nil
                 data -> process.send(state.self, Data(data))
               }
+              let extensions =
+                resp
+                |> response.get_header("sec-websocket-extensions")
+                |> result.map(string.split(_, ";"))
+                |> result.unwrap([])
+              let context = case websocket.has_deflate(extensions) {
+                True -> Some(compression.init())
+                False -> None
+              }
               actor.continue(
-                State(..state, socket: Some(socket), buffer: buffer),
+                State(
+                  ..state,
+                  socket: Some(socket),
+                  buffer: buffer,
+                  compression: context,
+                ),
               )
             })
             |> result.map_error(fn(err) {
               case err {
-                Protocol(_bits)
-                | Sock(_reason) -> {
+                Protocol(_bits) | Sock(_reason) -> {
                   let msg =
                     "Failed to connect to server: " <> string.inspect(err)
                   logging.log(logging.Error, msg)
@@ -252,7 +272,12 @@ pub fn initialize(
           }
           UserMessage(user_message) -> {
             let assert Some(socket) = state.socket
-            let conn = Connection(socket, transport)
+            let conn =
+              Connection(
+                socket,
+                transport,
+                option.map(state.compression, fn(context) { context.deflate }),
+              )
             let res =
               rescue(fn() {
                 builder.loop(User(user_message), state.user_state, conn)
@@ -286,16 +311,22 @@ pub fn initialize(
             }
           }
           Err(reason) -> {
+            close_contexts(state.compression)
             actor.Stop(process.Abnormal(string.inspect(reason)))
           }
           Data(bits) -> {
             let assert Some(socket) = state.socket
-            let conn = Connection(socket, transport)
+            let conn =
+              Connection(
+                socket,
+                transport,
+                option.map(state.compression, fn(context) { context.deflate }),
+              )
             let #(frames, rest) =
               websocket.get_messages(
                 bit_array.append(state.buffer, bits),
                 [],
-                None,
+                option.map(state.compression, fn(context) { context.inflate }),
               )
             let frames =
               websocket.aggregate_frames(frames, state.incomplete, [])
@@ -315,7 +346,10 @@ pub fn initialize(
             }
             |> fn(next) {
               case next {
-                actor.Stop(..) as stop -> stop
+                actor.Stop(..) as stop -> {
+                  close_contexts(state.compression)
+                  stop
+                }
                 actor.Continue(state, selector) -> {
                   let assert Ok(_) =
                     transport.set_opts(
@@ -331,11 +365,13 @@ pub fn initialize(
           Closed -> {
             logging.log(logging.Debug, "Received closed frame")
             builder.on_close(state.user_state)
+            close_contexts(state.compression)
             actor.Stop(process.Normal)
           }
           // TODO:  handle shutdown better?
           Shutdown -> {
             logging.log(logging.Debug, "Received shutdown messag")
+            close_contexts(state.compression)
             actor.Stop(process.Normal)
           }
         }
@@ -416,11 +452,19 @@ fn handle_frame(
       }
     }
     Control(PingFrame(payload, payload_length)) -> {
-      let frame =
-        websocket.frame_to_bytes_builder(
-          websocket.Control(websocket.PongFrame(payload, payload_length)),
-          Some(<<0:unit(8)-size(4)>>),
-        )
+      let frame = case conn.context {
+        Some(context) ->
+          websocket.compressed_frame_to_bytes_builder(
+            websocket.Control(websocket.PongFrame(payload, payload_length)),
+            context,
+            Some(<<0:unit(8)-size(4)>>),
+          )
+        None ->
+          websocket.frame_to_bytes_builder(
+            websocket.Control(websocket.PongFrame(payload, payload_length)),
+            Some(<<0:unit(8)-size(4)>>),
+          )
+      }
       let _ = transport.send(conn.transport, conn.socket, frame)
       actor.continue(state)
     }
@@ -491,21 +535,37 @@ pub fn send_ping(conn: Connection, data: BitArray) -> Result(Nil, SocketReason) 
     0 -> <<0:size(4)>>
     _n -> crypto.strong_random_bytes(4)
   }
-  let frame =
-    websocket.frame_to_bytes_builder(
-      websocket.Control(websocket.PingFrame(size, data)),
-      Some(mask),
-    )
+  let frame = case conn.context {
+    Some(context) ->
+      websocket.compressed_frame_to_bytes_builder(
+        websocket.Control(websocket.PingFrame(size, data)),
+        context,
+        Some(mask),
+      )
+    None ->
+      websocket.frame_to_bytes_builder(
+        websocket.Control(websocket.PingFrame(size, data)),
+        Some(mask),
+      )
+  }
   transport.send(conn.transport, conn.socket, frame)
 }
 
 /// This will close the WebSocket connection.
 pub fn close(conn: Connection) -> Result(Nil, SocketReason) {
-  let frame =
-    websocket.frame_to_bytes_builder(
-      websocket.Control(websocket.CloseFrame(0, <<>>)),
-      Some(crypto.strong_random_bytes(4)),
-    )
+  let frame = case conn.context {
+    Some(context) ->
+      websocket.compressed_frame_to_bytes_builder(
+        websocket.Control(websocket.CloseFrame(0, <<>>)),
+        context,
+        Some(crypto.strong_random_bytes(4)),
+      )
+    None ->
+      websocket.frame_to_bytes_builder(
+        websocket.Control(websocket.CloseFrame(0, <<>>)),
+        Some(crypto.strong_random_bytes(4)),
+      )
+  }
   transport.send(conn.transport, conn.socket, frame)
 }
 
@@ -616,8 +676,10 @@ fn perform_handshake(
     Sock,
   ))
 
+  let upgrade_req = make_upgrade(req, origin)
+
   use _nil <- result.try(result.map_error(
-    transport.send(transport, socket, make_upgrade(req, origin)),
+    transport.send(transport, socket, upgrade_req),
     Sock,
   ))
 
@@ -674,5 +736,16 @@ fn read_body(
         Error(reason) -> Error(reason)
       }
     }
+  }
+}
+
+fn close_contexts(contexts: Option(compression.Compression)) -> Nil {
+  case contexts {
+    Some(compression) -> {
+      compression.close(compression.deflate)
+      compression.close(compression.inflate)
+      Nil
+    }
+    _ -> Nil
   }
 }

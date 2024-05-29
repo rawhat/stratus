@@ -6,7 +6,12 @@ import gleam/result
 
 pub type Socket
 
-pub type SocketReason
+pub type SocketReason {
+  Closed
+  NotOwner
+  Badarg
+  Posix(String)
+}
 
 pub type TcpOption =
   #(Atom, Dynamic)
@@ -51,7 +56,20 @@ pub fn convert_options(options: List(Options)) -> List(TcpOption) {
         dynamic.from(Binary),
       )
       PacketsOf(List) -> #(atom.create_from_string("mode"), dynamic.from(List))
-      rest -> dynamic.unsafe_coerce(dynamic.from(rest))
+      Cacerts(data) -> #(atom.create_from_string("cacerts"), data)
+      Nodelay(bool) -> #(atom.create_from_string("nodelay"), dynamic.from(bool))
+      Reuseaddr(bool) -> #(
+        atom.create_from_string("reuseaddr"),
+        dynamic.from(bool),
+      )
+      SendTimeout(int) -> #(
+        atom.create_from_string("send_timeout"),
+        dynamic.from(int),
+      )
+      SendTimeoutClose(bool) -> #(
+        atom.create_from_string("send_timeout_close"),
+        dynamic.from(bool),
+      )
     }
   })
 }
@@ -64,7 +82,6 @@ pub type Shutdown {
 
 pub type SocketMessage {
   Data(BitArray)
-  Closed
   Err(SocketReason)
 }
 
@@ -75,6 +92,22 @@ type ErlangSocketMessage {
   Tcp
   TcpClosed
   TcpError
+}
+
+fn decode_socket_error(
+  dyn: Dynamic,
+) -> Result(SocketReason, List(dynamic.DecodeError)) {
+  dyn
+  |> atom.from_dynamic
+  |> result.map(atom.to_string)
+  |> result.map(fn(atom) {
+    case atom {
+      "closed" -> Closed
+      "not_owner" -> NotOwner
+      "badarg" -> Badarg
+      posix -> Posix(posix)
+    }
+  })
 }
 
 pub fn selector() -> Selector(SocketMessage) {
@@ -91,13 +124,15 @@ pub fn selector() -> Selector(SocketMessage) {
       |> result.map(Data)
     msg
   })
-  |> process.selecting_record2(SslClosed, fn(_socket) { Closed })
-  |> process.selecting_record2(TcpClosed, fn(_socket) { Closed })
+  |> process.selecting_record2(SslClosed, fn(_socket) { Err(Closed) })
+  |> process.selecting_record2(TcpClosed, fn(_socket) { Err(Closed) })
   |> process.selecting_record3(TcpError, fn(_sockets, reason) {
-    Err(dynamic.unsafe_coerce(reason))
+    let assert Ok(err) = decode_socket_error(reason)
+    Err(err)
   })
   |> process.selecting_record3(SslError, fn(_socket, reason) {
-    Err(dynamic.unsafe_coerce(reason))
+    let assert Ok(err) = decode_socket_error(reason)
+    Err(err)
   })
 }
 
