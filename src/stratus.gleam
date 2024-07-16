@@ -569,7 +569,7 @@ pub fn close(conn: Connection) -> Result(Nil, SocketReason) {
   transport.send(conn.transport, conn.socket, frame)
 }
 
-fn make_upgrade(req: Request(String), origin: String) -> BytesBuilder {
+fn make_upgrade(req: Request(String)) -> BytesBuilder {
   let user_headers =
     req.headers
     |> list.filter(fn(pair) {
@@ -579,7 +579,6 @@ fn make_upgrade(req: Request(String), origin: String) -> BytesBuilder {
       && key != "connection"
       && key != "sec-websocket-key"
       && key != "sec-websocket-version"
-      && key != "origin"
     })
     |> list.map(fn(pair) {
       let #(key, value) = pair
@@ -609,12 +608,11 @@ fn make_upgrade(req: Request(String), origin: String) -> BytesBuilder {
   |> bytes_builder.append_string("GET " <> path <> query <> " HTTP/1.1\r\n")
   |> bytes_builder.append_string("host: " <> req.host <> "\r\n")
   |> bytes_builder.append_string("upgrade: websocket\r\n")
-  |> bytes_builder.append_string("connection: Upgrade\r\n")
+  |> bytes_builder.append_string("connection: upgrade\r\n")
   |> bytes_builder.append_string(
     "sec-websocket-key: " <> websocket.client_key <> "\r\n",
   )
   |> bytes_builder.append_string("sec-websocket-version: 13\r\n")
-  |> bytes_builder.append_string("origin: " <> origin <> "\r\n")
   |> bytes_builder.append_string(
     "sec-websocket-extensions: permessage-deflate\r\n",
   )
@@ -654,13 +652,6 @@ fn perform_handshake(
       }
     })
 
-  let origin = case req.scheme, port {
-    Https, 443 -> "https://" <> req.host
-    Http, 80 -> "http://" <> req.host
-    Https, _ -> "https://" <> req.host <> ":" <> int.to_string(port)
-    _, _ -> "http://" <> req.host <> ":" <> int.to_string(port)
-  }
-
   logging.log(
     logging.Debug,
     "Making request to " <> req.host <> " at " <> int.to_string(port),
@@ -677,7 +668,7 @@ fn perform_handshake(
     Sock,
   ))
 
-  let upgrade_req = make_upgrade(req, origin)
+  let upgrade_req = make_upgrade(req)
 
   use _nil <- result.try(result.map_error(
     transport.send(transport, socket, upgrade_req),
