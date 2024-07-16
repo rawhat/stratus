@@ -586,6 +586,7 @@ fn make_upgrade(req: Request(String), origin: String) -> BytesBuilder {
       key <> ": " <> value
     })
     |> string.join("\r\n")
+    |> string.append("\r\n")
 
   let path = case req.path {
     "" -> "/"

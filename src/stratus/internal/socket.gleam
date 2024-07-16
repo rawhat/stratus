@@ -36,6 +36,7 @@ pub type Options {
   Reuseaddr(Bool)
   Nodelay(Bool)
   Cacerts(Dynamic)
+  CustomizeHostnameCheck(Dynamic)
 }
 
 pub const default_options = [
@@ -69,6 +70,10 @@ pub fn convert_options(options: List(Options)) -> List(TcpOption) {
       SendTimeoutClose(bool) -> #(
         atom.create_from_string("send_timeout_close"),
         dynamic.from(bool),
+      )
+      CustomizeHostnameCheck(funcs) -> #(
+        atom.create_from_string("customize_hostname_check"),
+        funcs,
       )
     }
   })
