@@ -570,22 +570,25 @@ pub fn close(conn: Connection) -> Result(Nil, SocketReason) {
 }
 
 fn make_upgrade(req: Request(String)) -> BytesBuilder {
-  let user_headers =
-    req.headers
-    |> list.filter(fn(pair) {
-      let #(key, _value) = pair
-      key != "host"
-      && key != "upgrade"
-      && key != "connection"
-      && key != "sec-websocket-key"
-      && key != "sec-websocket-version"
-    })
-    |> list.map(fn(pair) {
-      let #(key, value) = pair
-      key <> ": " <> value
-    })
-    |> string.join("\r\n")
-    |> string.append("\r\n")
+  let user_headers = case list.length(req.headers) > 0 {
+    True ->
+      req.headers
+      |> list.filter(fn(pair) {
+        let #(key, _value) = pair
+        key != "host"
+        && key != "upgrade"
+        && key != "connection"
+        && key != "sec-websocket-key"
+        && key != "sec-websocket-version"
+      })
+      |> list.map(fn(pair) {
+        let #(key, value) = pair
+        key <> ": " <> value
+      })
+      |> string.join("\r\n")
+      |> string.append("\r\n")
+    False -> ""
+  }
 
   let path = case req.path {
     "" -> "/"
