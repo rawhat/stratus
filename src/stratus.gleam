@@ -570,8 +570,9 @@ pub fn close(conn: Connection) -> Result(Nil, SocketReason) {
 }
 
 fn make_upgrade(req: Request(String)) -> BytesBuilder {
-  let user_headers = case list.length(req.headers) > 0 {
-    True ->
+  let user_headers = case req.headers {
+    [] -> ""
+    _ ->
       req.headers
       |> list.filter(fn(pair) {
         let #(key, _value) = pair
@@ -587,7 +588,6 @@ fn make_upgrade(req: Request(String)) -> BytesBuilder {
       })
       |> string.join("\r\n")
       |> string.append("\r\n")
-    False -> ""
   }
 
   let path = case req.path {
