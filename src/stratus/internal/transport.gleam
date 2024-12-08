@@ -1,4 +1,4 @@
-import gleam/bytes_builder.{type BytesBuilder}
+import gleam/bytes_tree.{type BytesTree}
 import gleam/erlang/charlist.{type Charlist}
 import stratus/internal/socket.{
   type Shutdown, type Socket, type SocketReason, type TcpOption,
@@ -27,7 +27,7 @@ pub fn connect(
 pub fn send(
   transport: Transport,
   socket: Socket,
-  data: BytesBuilder,
+  data: BytesTree,
 ) -> Result(Nil, SocketReason) {
   case transport {
     Ssl -> ssl.send(socket, data)

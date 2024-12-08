@@ -1,5 +1,5 @@
 import gleam/bit_array
-import gleam/bytes_builder.{type BytesBuilder}
+import gleam/bytes_tree.{type BytesTree}
 import gleam/crypto
 import gleam/erlang.{rescue}
 import gleam/erlang/charlist
@@ -454,13 +454,13 @@ fn handle_frame(
     Control(PingFrame(payload, payload_length)) -> {
       let frame = case conn.context {
         Some(context) ->
-          websocket.compressed_frame_to_bytes_builder(
+          websocket.compressed_frame_to_bytes_tree(
             websocket.Control(websocket.PongFrame(payload, payload_length)),
             context,
             Some(<<0:unit(8)-size(4)>>),
           )
         None ->
-          websocket.frame_to_bytes_builder(
+          websocket.frame_to_bytes_tree(
             websocket.Control(websocket.PongFrame(payload, payload_length)),
             Some(<<0:unit(8)-size(4)>>),
           )
@@ -537,13 +537,13 @@ pub fn send_ping(conn: Connection, data: BitArray) -> Result(Nil, SocketReason) 
   }
   let frame = case conn.context {
     Some(context) ->
-      websocket.compressed_frame_to_bytes_builder(
+      websocket.compressed_frame_to_bytes_tree(
         websocket.Control(websocket.PingFrame(size, data)),
         context,
         Some(mask),
       )
     None ->
-      websocket.frame_to_bytes_builder(
+      websocket.frame_to_bytes_tree(
         websocket.Control(websocket.PingFrame(size, data)),
         Some(mask),
       )
@@ -555,13 +555,13 @@ pub fn send_ping(conn: Connection, data: BitArray) -> Result(Nil, SocketReason) 
 pub fn close(conn: Connection) -> Result(Nil, SocketReason) {
   let frame = case conn.context {
     Some(context) ->
-      websocket.compressed_frame_to_bytes_builder(
+      websocket.compressed_frame_to_bytes_tree(
         websocket.Control(websocket.CloseFrame(0, <<>>)),
         context,
         Some(crypto.strong_random_bytes(4)),
       )
     None ->
-      websocket.frame_to_bytes_builder(
+      websocket.frame_to_bytes_tree(
         websocket.Control(websocket.CloseFrame(0, <<>>)),
         Some(crypto.strong_random_bytes(4)),
       )
@@ -569,7 +569,7 @@ pub fn close(conn: Connection) -> Result(Nil, SocketReason) {
   transport.send(conn.transport, conn.socket, frame)
 }
 
-fn make_upgrade(req: Request(String)) -> BytesBuilder {
+fn make_upgrade(req: Request(String)) -> BytesTree {
   let user_headers = case req.headers {
     [] -> ""
     _ ->
@@ -607,20 +607,20 @@ fn make_upgrade(req: Request(String)) -> BytesBuilder {
       }
     }
 
-  bytes_builder.new()
-  |> bytes_builder.append_string("GET " <> path <> query <> " HTTP/1.1\r\n")
-  |> bytes_builder.append_string("host: " <> req.host <> "\r\n")
-  |> bytes_builder.append_string("upgrade: websocket\r\n")
-  |> bytes_builder.append_string("connection: upgrade\r\n")
-  |> bytes_builder.append_string(
+  bytes_tree.new()
+  |> bytes_tree.append_string("GET " <> path <> query <> " HTTP/1.1\r\n")
+  |> bytes_tree.append_string("host: " <> req.host <> "\r\n")
+  |> bytes_tree.append_string("upgrade: websocket\r\n")
+  |> bytes_tree.append_string("connection: upgrade\r\n")
+  |> bytes_tree.append_string(
     "sec-websocket-key: " <> websocket.client_key <> "\r\n",
   )
-  |> bytes_builder.append_string("sec-websocket-version: 13\r\n")
-  |> bytes_builder.append_string(
+  |> bytes_tree.append_string("sec-websocket-version: 13\r\n")
+  |> bytes_tree.append_string(
     "sec-websocket-extensions: permessage-deflate\r\n",
   )
-  |> bytes_builder.append_string(user_headers)
-  |> bytes_builder.append_string("\r\n")
+  |> bytes_tree.append_string(user_headers)
+  |> bytes_tree.append_string("\r\n")
 }
 
 type HandshakeError {

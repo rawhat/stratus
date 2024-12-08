@@ -1,4 +1,4 @@
-import gleam/bytes_builder.{type BytesBuilder}
+import gleam/bytes_tree.{type BytesTree}
 import gleam/erlang/charlist.{type Charlist}
 import stratus/internal/socket.{
   type Shutdown, type Socket, type SocketReason, type TcpOption,
@@ -16,7 +16,7 @@ pub fn connect(
 pub fn shutdown(socket: Socket, how: Shutdown) -> Result(Nil, SocketReason)
 
 @external(erlang, "stratus_ffi", "ssl_send")
-pub fn send(socket: Socket, packet: BytesBuilder) -> Result(Nil, SocketReason)
+pub fn send(socket: Socket, packet: BytesTree) -> Result(Nil, SocketReason)
 
 @external(erlang, "ssl", "recv")
 pub fn receive(socket: Socket, length: Int) -> Result(BitArray, SocketReason)
