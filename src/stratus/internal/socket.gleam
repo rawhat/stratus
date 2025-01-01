@@ -40,8 +40,11 @@ pub type Options {
 }
 
 pub const default_options = [
-  PacketsOf(Binary), SendTimeout(30_000), SendTimeoutClose(True),
-  Reuseaddr(True), Nodelay(True),
+  PacketsOf(Binary),
+  SendTimeout(30_000),
+  SendTimeoutClose(True),
+  Reuseaddr(True),
+  Nodelay(True),
 ]
 
 pub fn convert_options(options: List(Options)) -> List(TcpOption) {
