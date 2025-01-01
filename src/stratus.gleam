@@ -500,11 +500,30 @@ fn handle_frame(
 /// send data to the server. Your message type would be -- in plain language --
 /// "this thing happened", and your loop would then send whatever relevant data
 /// corresponds to that event.
-pub fn send_message(
+pub fn send(
   subject: Subject(InternalMessage(user_message)),
   message: user_message,
 ) -> Nil {
   process.send(subject, UserMessage(message))
+}
+
+pub fn call(
+  subject: Subject(InternalMessage(user_message)),
+  make_message: fn(Subject(return)) -> user_message,
+  timeout: Int,
+) -> Result(return, process.CallError(return)) {
+  process.try_call(
+    subject,
+    fn(subj) { UserMessage(make_message(subj)) },
+    timeout,
+  )
+}
+
+pub fn call_forever(
+  subject: Subject(InternalMessage(user_message)),
+  make_message: fn(Subject(return)) -> user_message,
+) -> return {
+  process.call_forever(subject, fn(subj) { UserMessage(make_message(subj)) })
 }
 
 /// From within the actor loop, this is how you send a WebSocket text frame.

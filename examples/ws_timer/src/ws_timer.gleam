@@ -1,5 +1,5 @@
 import birl
-import gleam/erlang/process
+import gleam/erlang/process.{type Subject}
 import gleam/function
 import gleam/http/request
 import gleam/io
@@ -13,6 +13,7 @@ import stratus
 pub type Msg {
   Close
   TimeUpdated(String)
+  DoTheThing(Subject(Int))
 }
 
 pub type LogLevel {
@@ -45,6 +46,10 @@ pub fn main() {
             let assert Ok(_resp) = stratus.send_text_message(conn, msg)
             actor.continue(state)
           }
+          stratus.User(DoTheThing(resp)) -> {
+            process.send(resp, 1234)
+            actor.continue(state)
+          }
           stratus.Binary(_msg) -> actor.continue(state)
           stratus.User(Close) -> {
             let assert Ok(_) = stratus.close(conn)
@@ -62,14 +67,26 @@ pub fn main() {
       let now =
         birl.now()
         |> birl.to_iso8601
-      stratus.send_message(subj, TimeUpdated(now))
+      stratus.send(subj, TimeUpdated(now))
     })
 
   process.start(
     fn() {
       process.sleep(6000)
 
-      stratus.send_message(subj, Close)
+      stratus.send(subj, Close)
+    },
+    True,
+  )
+
+  process.start(
+    fn() {
+      process.sleep(500)
+      let assert Ok(resp) = stratus.call(subj, DoTheThing, 100)
+      io.debug(#("got the thing", resp))
+      process.sleep(1000)
+      let resp = stratus.call_forever(subj, DoTheThing)
+      io.debug(#("got the thing pt 2", resp))
     },
     True,
   )
