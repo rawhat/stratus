@@ -1,8 +1,10 @@
 import gleam/dynamic.{type Dynamic}
+import gleam/dynamic/decode
 import gleam/erlang/atom.{type Atom}
 import gleam/erlang/process.{type Selector}
 import gleam/list
 import gleam/result
+import gleam/string
 
 pub type Socket
 
@@ -102,45 +104,27 @@ type ErlangSocketMessage {
   TcpError
 }
 
-fn decode_socket_error(
-  dyn: Dynamic,
-) -> Result(SocketReason, List(dynamic.DecodeError)) {
-  dyn
-  |> atom.from_dynamic
-  |> result.map(atom.to_string)
-  |> result.map(fn(atom) {
-    case atom {
-      "closed" -> Closed
-      "not_owner" -> NotOwner
-      "badarg" -> Badarg
-      posix -> Posix(posix)
-    }
-  })
-}
-
 pub fn selector() -> Selector(SocketMessage) {
   process.new_selector()
   |> process.selecting_record3(Tcp, fn(_socket, msg) {
     let assert Ok(msg) =
-      dynamic.bit_array(msg)
+      decode.run(msg, decode.bit_array)
       |> result.map(Data)
     msg
   })
   |> process.selecting_record3(Ssl, fn(_socket, msg) {
     let assert Ok(msg) =
-      dynamic.bit_array(msg)
+      decode.run(msg, decode.bit_array)
       |> result.map(Data)
     msg
   })
   |> process.selecting_record2(SslClosed, fn(_socket) { Err(Closed) })
   |> process.selecting_record2(TcpClosed, fn(_socket) { Err(Closed) })
   |> process.selecting_record3(TcpError, fn(_sockets, reason) {
-    let assert Ok(err) = decode_socket_error(reason)
-    Err(err)
+    Err(Posix(string.inspect(reason)))
   })
   |> process.selecting_record3(SslError, fn(_socket, reason) {
-    let assert Ok(err) = decode_socket_error(reason)
-    Err(err)
+    Err(Posix(string.inspect(reason)))
   })
 }
 
