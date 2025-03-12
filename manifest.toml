@@ -18,13 +18,13 @@ packages = [
 ]
 
 [requirements]
-birl = { version = ">= 1.8.0 and < 2.0.0" }
-gleam_crypto = { version = ">= 1.4.0 and < 2.0.0" }
-gleam_erlang = { version = ">= 0.34.0 and < 1.0.0" }
-gleam_http = { version = ">= 4.0.0 and < 5.0.0" }
-gleam_otp = { version = ">= 0.16.1 and < 1.0.0" }
-gleam_stdlib = { version = ">= 0.57.0 and < 1.0.0" }
-gleeunit = { version = ">= 1.3.0 and < 2.0.0" }
-gramps = { version = ">= 3.0.1 and < 4.0.0" }
-logging = { version = ">= 1.3.0 and < 2.0.0" }
-repeatedly = { version = ">= 2.1.2 and < 3.0.0" }
+birl = { version = ">= 1.5.0 and < 2.0.0" }
+gleam_crypto = { version = ">= 1.3.0 and < 2.0.0" }
+gleam_erlang = { version = ">= 0.24.0 and < 1.0.0" }
+gleam_http = { version = ">= 3.5.0 and < 5.0.0" }
+gleam_otp = { version = ">= 0.9.0 and < 1.0.0" }
+gleam_stdlib = { version = ">= 0.44.0 and < 1.0.0" }
+gleeunit = { version = ">= 1.0.0 and < 2.0.0" }
+gramps = { version = ">= 3.0.0 and < 4.0.0" }
+logging = { version = ">= 1.0.0 and < 2.0.0" }
+repeatedly = { version = ">= 2.1.0 and < 3.0.0" }
