@@ -489,41 +489,24 @@ fn handle_frame(
   }
 }
 
-/// Since the actor receives the raw data from the WebSocket, it needs a less
-/// ergonomic message type. You probably don't want (read: shouldn't be able to)
-/// send `Data(bits)` to the process, so that message type is opaque.
-///
-/// To get around that, this helper method lets you provide your custom message
-/// type to the actor.
-///
-/// This is likely what you want if you want to be able to tell the actor to
-/// send data to the server. Your message type would be -- in plain language --
-/// "this thing happened", and your loop would then send whatever relevant data
-/// corresponds to that event.
-pub fn send(
-  subject: Subject(InternalMessage(user_message)),
-  message: user_message,
-) -> Nil {
-  process.send(subject, UserMessage(message))
-}
-
-pub fn call(
-  subject: Subject(InternalMessage(user_message)),
-  make_message: fn(Subject(return)) -> user_message,
-  timeout: Int,
-) -> Result(return, process.CallError(return)) {
-  process.try_call(
-    subject,
-    fn(subj) { UserMessage(make_message(subj)) },
-    timeout,
-  )
-}
-
-pub fn call_forever(
-  subject: Subject(InternalMessage(user_message)),
-  make_message: fn(Subject(return)) -> user_message,
-) -> return {
-  process.call_forever(subject, fn(subj) { UserMessage(make_message(subj)) })
+/// The `Subject` returned from `initialize` is an opaque type.  In order to
+/// send custom messages to your process, you can do this mapping.
+/// 
+/// For example:
+/// ```gleam
+///   // using `process.send`
+///   MyMessage(some_data)
+///   |> stratus.to_user_message
+///   |> process.send(stratus_subject, _)
+///   // using `process.try_call`
+///   process.try_call(stratus_subject, fn(subj) {
+///     stratus.to_user_message(MyMessage(some_data, subj))
+///   })
+/// ```
+pub fn to_user_message(
+  user_message: user_message,
+) -> InternalMessage(user_message) {
+  UserMessage(user_message)
 }
 
 /// From within the actor loop, this is how you send a WebSocket text frame.

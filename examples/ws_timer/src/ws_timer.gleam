@@ -64,17 +64,19 @@ pub fn main() {
 
   let timer =
     repeatedly.call(1000, Nil, fn(_state, _count_) {
-      let now =
-        birl.now()
-        |> birl.to_iso8601
-      stratus.send(subj, TimeUpdated(now))
+      birl.now()
+      |> birl.to_iso8601
+      |> TimeUpdated
+      |> stratus.to_user_message
+      |> process.send(subj, _)
     })
 
   process.start(
     fn() {
       process.sleep(6000)
 
-      stratus.send(subj, Close)
+      stratus.to_user_message(Close)
+      |> process.send(subj, _)
     },
     True,
   )
@@ -82,10 +84,18 @@ pub fn main() {
   process.start(
     fn() {
       process.sleep(500)
-      let assert Ok(resp) = stratus.call(subj, DoTheThing, 100)
+      let assert Ok(resp) =
+        process.try_call(
+          subj,
+          fn(subj) { stratus.to_user_message(DoTheThing(subj)) },
+          100,
+        )
       io.debug(#("got the thing", resp))
       process.sleep(1000)
-      let resp = stratus.call_forever(subj, DoTheThing)
+      let resp =
+        process.call_forever(subj, fn(subj) {
+          stratus.to_user_message(DoTheThing(subj))
+        })
       io.debug(#("got the thing pt 2", resp))
     },
     True,
