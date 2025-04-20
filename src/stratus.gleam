@@ -7,7 +7,7 @@ import gleam/erlang/process.{type Selector, type Subject}
 import gleam/function
 import gleam/http.{Http, Https}
 import gleam/http/request.{type Request}
-import gleam/http/response.{type Response, Response}
+import gleam/http/response.{type Response}
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -17,7 +17,7 @@ import gleam/string
 import gleam/uri
 import gramps/http as gramps_http
 import gramps/websocket.{
-  type DataFrame, BinaryFrame, CloseFrame, Continuation, Control,
+  BinaryFrame, CloseFrame, Continuation, Control,
   Data as DataFrame, PingFrame, PongFrame, TextFrame,
 }
 import gramps/websocket/compression
@@ -336,7 +336,7 @@ pub fn initialize(
                 list.fold_until(frames, actor.continue(state), fn(acc, frame) {
                   let assert actor.Continue(prev_state, _selector) = acc
                   case
-                    handle_frame(builder, transport, prev_state, conn, frame)
+                    handle_frame(builder, prev_state, conn, frame)
                   {
                     actor.Continue(..) as next -> list.Continue(next)
                     actor.Stop(..) as err -> list.Stop(err)
@@ -382,12 +382,10 @@ pub fn initialize(
 
 fn handle_frame(
   builder: Builder(user_state, user_message),
-  transport: Transport,
   state: State(user_state, user_message),
   conn: Connection,
   frame: websocket.Frame,
 ) -> actor.Next(InternalMessage(user_message), State(user_state, user_message)) {
-  let assert Some(socket) = state.socket
   case frame {
     DataFrame(TextFrame(payload: data, ..)) -> {
       let assert Ok(str) = bit_array.to_string(data)
@@ -491,7 +489,7 @@ fn handle_frame(
 
 /// The `Subject` returned from `initialize` is an opaque type.  In order to
 /// send custom messages to your process, you can do this mapping.
-/// 
+///
 /// For example:
 /// ```gleam
 ///   // using `process.send`
