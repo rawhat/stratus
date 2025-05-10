@@ -3,7 +3,6 @@ import gleam/dynamic/decode
 import gleam/erlang/atom.{type Atom}
 import gleam/erlang/process.{type Selector}
 import gleam/list
-import gleam/result
 import gleam/string
 
 pub type Socket
@@ -50,34 +49,25 @@ pub const default_options = [
 ]
 
 pub fn convert_options(options: List(Options)) -> List(TcpOption) {
-  let active = atom.create_from_string("active")
+  let active = atom.create("active")
   list.map(options, fn(opt) {
     case opt {
       Receive(Count(count)) -> #(active, dynamic.from(count))
-      Receive(Once) -> #(active, dynamic.from(atom.create_from_string("once")))
+      Receive(Once) -> #(active, dynamic.from(atom.create("once")))
       Receive(Pull) -> #(active, dynamic.from(False))
       Receive(All) -> #(active, dynamic.from(True))
-      PacketsOf(Binary) -> #(
-        atom.create_from_string("mode"),
-        dynamic.from(Binary),
-      )
-      PacketsOf(List) -> #(atom.create_from_string("mode"), dynamic.from(List))
-      Cacerts(data) -> #(atom.create_from_string("cacerts"), data)
-      Nodelay(bool) -> #(atom.create_from_string("nodelay"), dynamic.from(bool))
-      Reuseaddr(bool) -> #(
-        atom.create_from_string("reuseaddr"),
-        dynamic.from(bool),
-      )
-      SendTimeout(int) -> #(
-        atom.create_from_string("send_timeout"),
-        dynamic.from(int),
-      )
+      PacketsOf(Binary) -> #(atom.create("mode"), dynamic.from(Binary))
+      PacketsOf(List) -> #(atom.create("mode"), dynamic.from(List))
+      Cacerts(data) -> #(atom.create("cacerts"), data)
+      Nodelay(bool) -> #(atom.create("nodelay"), dynamic.from(bool))
+      Reuseaddr(bool) -> #(atom.create("reuseaddr"), dynamic.from(bool))
+      SendTimeout(int) -> #(atom.create("send_timeout"), dynamic.from(int))
       SendTimeoutClose(bool) -> #(
-        atom.create_from_string("send_timeout_close"),
+        atom.create("send_timeout_close"),
         dynamic.from(bool),
       )
       CustomizeHostnameCheck(funcs) -> #(
-        atom.create_from_string("customize_hostname_check"),
+        atom.create("customize_hostname_check"),
         funcs,
       )
     }
@@ -104,27 +94,37 @@ type ErlangSocketMessage {
   TcpError
 }
 
-pub fn selector() -> Selector(SocketMessage) {
+pub fn selector() -> Selector(Result(SocketMessage, List(decode.DecodeError))) {
   process.new_selector()
-  |> process.selecting_record3(Tcp, fn(_socket, msg) {
-    let assert Ok(msg) =
-      decode.run(msg, decode.bit_array)
-      |> result.map(Data)
-    msg
+  |> process.select_record(Tcp, 2, fn(data) {
+    {
+      use msg <- decode.field(2, decode.bit_array)
+      decode.success(Data(msg))
+    }
+    |> decode.run(data, _)
   })
-  |> process.selecting_record3(Ssl, fn(_socket, msg) {
-    let assert Ok(msg) =
-      decode.run(msg, decode.bit_array)
-      |> result.map(Data)
-    msg
+  |> process.select_record(Ssl, 2, fn(data) {
+    {
+      use msg <- decode.field(2, decode.bit_array)
+      decode.success(Data(msg))
+    }
+    |> decode.run(data, _)
   })
-  |> process.selecting_record2(SslClosed, fn(_socket) { Err(Closed) })
-  |> process.selecting_record2(TcpClosed, fn(_socket) { Err(Closed) })
-  |> process.selecting_record3(TcpError, fn(_sockets, reason) {
-    Err(Posix(string.inspect(reason)))
+  |> process.select_record(SslClosed, 1, fn(_socket) { Ok(Err(Closed)) })
+  |> process.select_record(TcpClosed, 1, fn(_socket) { Ok(Err(Closed)) })
+  |> process.select_record(TcpError, 2, fn(data) {
+    {
+      use reason <- decode.field(2, decode.dynamic)
+      decode.success(Err(Posix(string.inspect(reason))))
+    }
+    |> decode.run(data, _)
   })
-  |> process.selecting_record3(SslError, fn(_socket, reason) {
-    Err(Posix(string.inspect(reason)))
+  |> process.select_record(SslError, 2, fn(data) {
+    {
+      use reason <- decode.field(2, decode.dynamic)
+      decode.success(Err(Posix(string.inspect(reason))))
+    }
+    |> decode.run(data, _)
   })
 }
 

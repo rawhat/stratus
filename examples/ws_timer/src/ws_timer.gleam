@@ -36,7 +36,7 @@ pub fn main() {
     stratus.websocket(
       request: req,
       init: fn() { #(Nil, None) },
-      loop: fn(msg, state, conn) {
+      loop: fn(state, msg, conn) {
         case msg {
           stratus.Text(msg) -> {
             logging.log(logging.Info, "Got a message: " <> msg)
@@ -68,46 +68,39 @@ pub fn main() {
       |> birl.to_iso8601
       |> TimeUpdated
       |> stratus.to_user_message
-      |> process.send(subj, _)
+      |> process.send(subj.data, _)
     })
 
-  process.start(
-    fn() {
-      process.sleep(6000)
+  process.spawn(fn() {
+    process.sleep(6000)
 
-      stratus.to_user_message(Close)
-      |> process.send(subj, _)
-    },
-    True,
-  )
+    stratus.to_user_message(Close)
+    |> process.send(subj.data, _)
+  })
 
-  process.start(
-    fn() {
-      process.sleep(500)
-      let assert Ok(resp) =
-        process.try_call(
-          subj,
-          fn(subj) { stratus.to_user_message(DoTheThing(subj)) },
-          100,
-        )
-      io.debug(#("got the thing", resp))
-      process.sleep(1000)
-      let resp =
-        process.call_forever(subj, fn(subj) {
-          stratus.to_user_message(DoTheThing(subj))
-        })
-      io.debug(#("got the thing pt 2", resp))
-    },
-    True,
-  )
+  process.spawn(fn() {
+    process.sleep(500)
+    let resp =
+      process.call(subj.data, 100, fn(subj) {
+        stratus.to_user_message(DoTheThing(subj))
+      })
+    echo #("got the thing", resp)
+    process.sleep(1000)
+    let resp =
+      process.call_forever(subj.data, fn(subj) {
+        stratus.to_user_message(DoTheThing(subj))
+      })
+    echo #("got the thing pt 2", resp)
+  })
 
+  let assert Ok(owner) = process.subject_owner(subj.data)
   let done =
     process.new_selector()
-    |> process.selecting_process_down(
-      process.monitor_process(process.subject_owner(subj)),
+    |> process.select_specific_monitor(
+      process.monitor(owner),
       function.identity,
     )
-    |> process.select_forever
+    |> process.selector_receive_forever
 
   logging.log(
     logging.Info,

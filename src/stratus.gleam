@@ -1,10 +1,9 @@
 import gleam/bit_array
 import gleam/bytes_tree.{type BytesTree}
 import gleam/crypto
-import gleam/erlang.{rescue}
+import gleam/dynamic.{type Dynamic}
 import gleam/erlang/charlist
 import gleam/erlang/process.{type Selector, type Subject}
-import gleam/function
 import gleam/http.{Http, Https}
 import gleam/http/request.{type Request}
 import gleam/http/response.{type Response}
@@ -17,8 +16,8 @@ import gleam/string
 import gleam/uri
 import gramps/http as gramps_http
 import gramps/websocket.{
-  BinaryFrame, CloseFrame, Continuation, Control,
-  Data as DataFrame, PingFrame, PongFrame, TextFrame,
+  BinaryFrame, CloseFrame, Continuation, Control, Data as DataFrame, PingFrame,
+  PongFrame, TextFrame,
 }
 import gramps/websocket/compression
 import logging
@@ -28,6 +27,9 @@ import stratus/internal/socket.{
 }
 import stratus/internal/ssl
 import stratus/internal/transport.{type Transport, Ssl, Tcp}
+
+@external(erlang, "stratus_ffi", "rescue")
+fn rescue(func: fn() -> return) -> Result(return, Dynamic)
 
 /// This holds some information needed to communicate with the WebSocket.
 pub opaque type Connection {
@@ -69,8 +71,8 @@ pub opaque type Builder(state, user_message) {
     request: Request(String),
     connect_timeout: Int,
     init: fn() -> #(state, Option(Selector(user_message))),
-    loop: fn(Message(user_message), state, Connection) ->
-      actor.Next(user_message, state),
+    loop: fn(state, Message(user_message), Connection) ->
+      actor.Next(state, user_message),
     on_close: fn(state) -> Nil,
     on_handshake_error: fn(Response(BitArray)) -> Nil,
   )
@@ -84,8 +86,8 @@ pub opaque type Builder(state, user_message) {
 pub fn websocket(
   request req: Request(String),
   init init: fn() -> #(state, Option(Selector(user_message))),
-  loop loop: fn(Message(user_message), state, Connection) ->
-    actor.Next(user_message, state),
+  loop loop: fn(state, Message(user_message), Connection) ->
+    actor.Next(state, user_message),
 ) -> Builder(state, user_message) {
   Builder(
     request: req,
@@ -153,231 +155,446 @@ type State(state, user_message) {
 /// send a close frame and end the connection.
 pub fn initialize(
   builder: Builder(state, user_message),
-) -> Result(Subject(InternalMessage(user_message)), actor.StartError) {
+) -> Result(
+  actor.Started(Subject(InternalMessage(user_message))),
+  actor.StartError,
+) {
   let transport = case builder.request.scheme {
     Https -> Ssl
     _ -> Tcp
   }
 
-  actor.start_spec(
-    actor.Spec(
-      init: fn() {
-        let subj = process.new_subject()
-        let started_selector =
-          process.selecting(process.new_selector(), subj, function.identity)
-        logging.log(logging.Debug, "Calling user initializer")
-        let #(user_state, user_selector) = builder.init()
-        let selector = case user_selector {
-          Some(selector) -> {
-            selector
-            |> process.map_selector(UserMessage)
-            |> process.merge_selector(started_selector)
-            |> process.merge_selector(process.map_selector(
-              socket.selector(),
-              from_socket_message,
-            ))
-          }
-          _ ->
-            started_selector
-            |> process.merge_selector(process.map_selector(
-              socket.selector(),
-              from_socket_message,
-            ))
-        }
-        process.send(subj, Started)
-        actor.Ready(
-          State(
-            buffer: <<>>,
-            incomplete: None,
-            self: subj,
-            socket: None,
-            user_state: user_state,
-            compression: None,
-          ),
-          selector,
+  actor.new_with_initialiser(1000, fn(subject) {
+    let started_selector = process.select(process.new_selector(), subject)
+    logging.log(logging.Debug, "Calling user initializer")
+    let #(user_state, user_selector) = builder.init()
+    let selector = case user_selector {
+      Some(selector) -> {
+        selector
+        |> process.map_selector(UserMessage)
+        |> process.merge_selector(started_selector)
+        |> process.merge_selector(
+          process.map_selector(socket.selector(), fn(msg) {
+            let assert Ok(msg) = msg
+            from_socket_message(msg)
+          }),
         )
-      },
-      init_timeout: 1000,
-      loop: fn(msg, state) {
-        case msg {
-          Started -> {
-            logging.log(
-              logging.Debug,
-              "Attempting handshake to "
-                <> uri.to_string(request.to_uri(builder.request)),
-            )
-            perform_handshake(
-              builder.request,
-              transport,
-              builder.connect_timeout,
-            )
-            |> result.then(fn(pair) {
-              logging.log(logging.Debug, "Handshake successful")
-              transport.set_opts(
-                transport,
-                pair.0,
-                socket.convert_options([Receive(Once)]),
-              )
-              |> result.replace(pair)
-              |> result.map_error(Sock)
-            })
-            |> result.map(fn(pair) {
-              let #(socket, resp, buffer) = pair
+      }
+      _ ->
+        started_selector
+        |> process.merge_selector(
+          process.map_selector(socket.selector(), fn(msg) {
+            let assert Ok(msg) = msg
+            from_socket_message(msg)
+          }),
+        )
+    }
+    process.send(subject, Started)
+    State(
+      buffer: <<>>,
+      incomplete: None,
+      self: subject,
+      socket: None,
+      user_state: user_state,
+      compression: None,
+    )
+    |> actor.initialised
+    |> actor.selecting(selector)
+    |> actor.returning(subject)
+    |> Ok
+  })
+  |> actor.on_message(fn(state, message) {
+    case message {
+      Started -> {
+        logging.log(
+          logging.Debug,
+          "Attempting handshake to "
+            <> uri.to_string(request.to_uri(builder.request)),
+        )
+        perform_handshake(builder.request, transport, builder.connect_timeout)
+        |> result.then(fn(pair) {
+          logging.log(logging.Debug, "Handshake successful")
+          transport.set_opts(
+            transport,
+            pair.0,
+            socket.convert_options([Receive(Once)]),
+          )
+          |> result.replace(pair)
+          |> result.map_error(Sock)
+        })
+        |> result.map(fn(pair) {
+          let #(socket, resp, buffer) = pair
+          logging.log(
+            logging.Debug,
+            "WebSocket process ready to start receiving",
+          )
+          let _ = case buffer {
+            <<>> -> Nil
+            data -> process.send(state.self, Data(data))
+          }
+          let extensions =
+            resp
+            |> response.get_header("sec-websocket-extensions")
+            |> result.map(string.split(_, ";"))
+            |> result.unwrap([])
+          let context = case websocket.has_deflate(extensions) {
+            True -> Some(compression.init())
+            False -> None
+          }
+          actor.continue(
+            State(
+              ..state,
+              socket: Some(socket),
+              buffer: buffer,
+              compression: context,
+            ),
+          )
+        })
+        |> result.map_error(fn(err) {
+          case err {
+            Protocol(_bits) | Sock(_reason) -> {
+              let msg = "Failed to connect to server: " <> string.inspect(err)
+              logging.log(logging.Error, msg)
+              actor.Stop(process.Abnormal(dynamic.from(message)))
+            }
+            UpgradeFailed(resp) -> {
+              builder.on_handshake_error(resp)
               logging.log(
-                logging.Debug,
-                "WebSocket process ready to start receiving",
+                logging.Error,
+                "WebSocket handshake failed with status "
+                  <> int.to_string(resp.status),
               )
-              let _ = case buffer {
-                <<>> -> Nil
-                data -> process.send(state.self, Data(data))
-              }
-              let extensions =
-                resp
-                |> response.get_header("sec-websocket-extensions")
-                |> result.map(string.split(_, ";"))
-                |> result.unwrap([])
-              let context = case websocket.has_deflate(extensions) {
-                True -> Some(compression.init())
-                False -> None
-              }
-              actor.continue(
-                State(
-                  ..state,
-                  socket: Some(socket),
-                  buffer: buffer,
-                  compression: context,
-                ),
+              actor.Stop(
+                process.Abnormal(dynamic.from("WebSocket handshake failed")),
               )
-            })
-            |> result.map_error(fn(err) {
-              case err {
-                Protocol(_bits) | Sock(_reason) -> {
-                  let msg =
-                    "Failed to connect to server: " <> string.inspect(err)
-                  logging.log(logging.Error, msg)
-                  actor.Stop(process.Abnormal(msg))
-                }
-                UpgradeFailed(resp) -> {
-                  builder.on_handshake_error(resp)
-                  logging.log(
-                    logging.Error,
-                    "WebSocket handshake failed with status "
-                      <> int.to_string(resp.status),
+            }
+          }
+        })
+        |> result.unwrap_both
+      }
+      UserMessage(user_message) -> {
+        let assert Some(socket) = state.socket
+        let conn =
+          Connection(
+            socket,
+            transport,
+            option.map(state.compression, fn(context) { context.deflate }),
+          )
+        let res =
+          rescue(fn() {
+            builder.loop(state.user_state, User(user_message), conn)
+          })
+        case res {
+          // TODO:  de-dupe this
+          Ok(actor.Continue(user_state, user_selector)) -> {
+            let new_state = State(..state, user_state: user_state)
+            case user_selector {
+              Some(user_selector) -> {
+                let selector =
+                  user_selector
+                  |> process.map_selector(UserMessage)
+                  |> process.merge_selector(
+                    process.map_selector(socket.selector(), fn(msg) {
+                      let assert Ok(msg) = msg
+                      from_socket_message(msg)
+                    }),
                   )
-                  actor.Stop(process.Abnormal("WebSocket handshake failed"))
-                }
+                actor.Continue(new_state, Some(selector))
               }
-            })
-            |> result.unwrap_both
-          }
-          UserMessage(user_message) -> {
-            let assert Some(socket) = state.socket
-            let conn =
-              Connection(
-                socket,
-                transport,
-                option.map(state.compression, fn(context) { context.deflate }),
-              )
-            let res =
-              rescue(fn() {
-                builder.loop(User(user_message), state.user_state, conn)
-              })
-            case res {
-              // TODO:  de-dupe this
-              Ok(actor.Continue(user_state, user_selector)) -> {
-                let new_state = State(..state, user_state: user_state)
-                case user_selector {
-                  Some(user_selector) -> {
-                    let selector =
-                      user_selector
-                      |> process.map_selector(UserMessage)
-                      |> process.merge_selector(process.map_selector(
-                        socket.selector(),
-                        from_socket_message,
-                      ))
-                    actor.Continue(new_state, Some(selector))
-                  }
-                  _ -> actor.continue(new_state)
-                }
-              }
-              Ok(actor.Stop(reason)) -> actor.Stop(reason)
-              Error(reason) -> {
-                logging.log(
-                  logging.Error,
-                  "Caught error in user handler: " <> string.inspect(reason),
-                )
-                actor.continue(state)
-              }
+              _ -> actor.continue(new_state)
             }
           }
-          Err(reason) -> {
-            close_contexts(state.compression)
-            actor.Stop(process.Abnormal(string.inspect(reason)))
-          }
-          Data(bits) -> {
-            let assert Some(socket) = state.socket
-            let conn =
-              Connection(
-                socket,
-                transport,
-                option.map(state.compression, fn(context) { context.deflate }),
-              )
-            let #(frames, rest) =
-              websocket.get_messages(
-                bit_array.append(state.buffer, bits),
-                [],
-                option.map(state.compression, fn(context) { context.inflate }),
-              )
-            let frames =
-              websocket.aggregate_frames(frames, state.incomplete, [])
-            case frames {
-              Error(Nil) -> actor.continue(state)
-              Ok(frames) -> {
-                list.fold_until(frames, actor.continue(state), fn(acc, frame) {
-                  let assert actor.Continue(prev_state, _selector) = acc
-                  case
-                    handle_frame(builder, prev_state, conn, frame)
-                  {
-                    actor.Continue(..) as next -> list.Continue(next)
-                    actor.Stop(..) as err -> list.Stop(err)
-                  }
-                })
-              }
-            }
-            |> fn(next) {
-              case next {
-                actor.Stop(..) as stop -> {
-                  close_contexts(state.compression)
-                  stop
-                }
-                actor.Continue(state, selector) -> {
-                  let assert Ok(_) =
-                    transport.set_opts(
-                      transport,
-                      socket,
-                      socket.convert_options([Receive(Once)]),
-                    )
-                  actor.Continue(State(..state, buffer: rest), selector)
-                }
-              }
-            }
-          }
-          Closed -> {
-            logging.log(logging.Debug, "Received closed frame")
-            builder.on_close(state.user_state)
-            close_contexts(state.compression)
-            actor.Stop(process.Normal)
-          }
-          // TODO:  handle shutdown better?
-          Shutdown -> {
-            logging.log(logging.Debug, "Received shutdown messag")
-            close_contexts(state.compression)
-            actor.Stop(process.Normal)
+          Ok(actor.Stop(reason)) -> actor.Stop(reason)
+          Error(reason) -> {
+            logging.log(
+              logging.Error,
+              "Caught error in user handler: " <> string.inspect(reason),
+            )
+            actor.continue(state)
           }
         }
-      },
-    ),
-  )
+      }
+      Err(reason) -> {
+        close_contexts(state.compression)
+        actor.Stop(process.Abnormal(dynamic.from(reason)))
+      }
+      Data(bits) -> {
+        let assert Some(socket) = state.socket
+        let conn =
+          Connection(
+            socket,
+            transport,
+            option.map(state.compression, fn(context) { context.deflate }),
+          )
+        let #(frames, rest) =
+          websocket.get_messages(
+            bit_array.append(state.buffer, bits),
+            [],
+            option.map(state.compression, fn(context) { context.inflate }),
+          )
+        let frames = websocket.aggregate_frames(frames, state.incomplete, [])
+        case frames {
+          Error(Nil) -> actor.continue(state)
+          Ok(frames) -> {
+            list.fold_until(frames, actor.continue(state), fn(acc, frame) {
+              let assert actor.Continue(prev_state, _selector) = acc
+              case handle_frame(builder, prev_state, conn, frame) {
+                actor.Continue(..) as next -> list.Continue(next)
+                actor.Stop(..) as err -> list.Stop(err)
+              }
+            })
+          }
+        }
+        |> fn(next) {
+          case next {
+            actor.Stop(..) as stop -> {
+              close_contexts(state.compression)
+              stop
+            }
+            actor.Continue(state, selector) -> {
+              let assert Ok(_) =
+                transport.set_opts(
+                  transport,
+                  socket,
+                  socket.convert_options([Receive(Once)]),
+                )
+              actor.Continue(State(..state, buffer: rest), selector)
+            }
+          }
+        }
+      }
+      Closed -> {
+        logging.log(logging.Debug, "Received closed frame")
+        builder.on_close(state.user_state)
+        close_contexts(state.compression)
+        actor.Stop(process.Normal)
+      }
+      // TODO:  handle shutdown better?
+      Shutdown -> {
+        logging.log(logging.Debug, "Received shutdown messag")
+        close_contexts(state.compression)
+        actor.Stop(process.Normal)
+      }
+    }
+  })
+  |> actor.start
+  // actor.start_spec(
+  //   actor.Spec(
+  //     init: fn() {
+  //       let subj = process.new_subject()
+  //       let started_selector =
+  //         process.selecting(process.new_selector(), subj, function.identity)
+  //       logging.log(logging.Debug, "Calling user initializer")
+  //       let #(user_state, user_selector) = builder.init()
+  //       let selector = case user_selector {
+  //         Some(selector) -> {
+  //           selector
+  //           |> process.map_selector(UserMessage)
+  //           |> process.merge_selector(started_selector)
+  //           |> process.merge_selector(process.map_selector(
+  //             socket.selector(),
+  //             from_socket_message,
+  //           ))
+  //         }
+  //         _ ->
+  //           started_selector
+  //           |> process.merge_selector(process.map_selector(
+  //             socket.selector(),
+  //             from_socket_message,
+  //           ))
+  //       }
+  //       process.send(subj, Started)
+  //       actor.Ready(
+  //         State(
+  //           buffer: <<>>,
+  //           incomplete: None,
+  //           self: subj,
+  //           socket: None,
+  //           user_state: user_state,
+  //           compression: None,
+  //         ),
+  //         selector,
+  //       )
+  //     },
+  //     init_timeout: 1000,
+  //     loop: fn(msg, state) {
+  //       case msg {
+  //         Started -> {
+  //           logging.log(
+  //             logging.Debug,
+  //             "Attempting handshake to "
+  //               <> uri.to_string(request.to_uri(builder.request)),
+  //           )
+  //           perform_handshake(
+  //             builder.request,
+  //             transport,
+  //             builder.connect_timeout,
+  //           )
+  //           |> result.then(fn(pair) {
+  //             logging.log(logging.Debug, "Handshake successful")
+  //             transport.set_opts(
+  //               transport,
+  //               pair.0,
+  //               socket.convert_options([Receive(Once)]),
+  //             )
+  //             |> result.replace(pair)
+  //             |> result.map_error(Sock)
+  //           })
+  //           |> result.map(fn(pair) {
+  //             let #(socket, resp, buffer) = pair
+  //             logging.log(
+  //               logging.Debug,
+  //               "WebSocket process ready to start receiving",
+  //             )
+  //             let _ = case buffer {
+  //               <<>> -> Nil
+  //               data -> process.send(state.self, Data(data))
+  //             }
+  //             let extensions =
+  //               resp
+  //               |> response.get_header("sec-websocket-extensions")
+  //               |> result.map(string.split(_, ";"))
+  //               |> result.unwrap([])
+  //             let context = case websocket.has_deflate(extensions) {
+  //               True -> Some(compression.init())
+  //               False -> None
+  //             }
+  //             actor.continue(
+  //               State(
+  //                 ..state,
+  //                 socket: Some(socket),
+  //                 buffer: buffer,
+  //                 compression: context,
+  //               ),
+  //             )
+  //           })
+  //           |> result.map_error(fn(err) {
+  //             case err {
+  //               Protocol(_bits) | Sock(_reason) -> {
+  //                 let msg =
+  //                   "Failed to connect to server: " <> string.inspect(err)
+  //                 logging.log(logging.Error, msg)
+  //                 actor.Stop(process.Abnormal(msg))
+  //               }
+  //               UpgradeFailed(resp) -> {
+  //                 builder.on_handshake_error(resp)
+  //                 logging.log(
+  //                   logging.Error,
+  //                   "WebSocket handshake failed with status "
+  //                     <> int.to_string(resp.status),
+  //                 )
+  //                 actor.Stop(process.Abnormal("WebSocket handshake failed"))
+  //               }
+  //             }
+  //           })
+  //           |> result.unwrap_both
+  //         }
+  //         UserMessage(user_message) -> {
+  //           let assert Some(socket) = state.socket
+  //           let conn =
+  //             Connection(
+  //               socket,
+  //               transport,
+  //               option.map(state.compression, fn(context) { context.deflate }),
+  //             )
+  //           let res =
+  //             rescue(fn() {
+  //               builder.loop(User(user_message), state.user_state, conn)
+  //             })
+  //           case res {
+  //             // TODO:  de-dupe this
+  //             Ok(actor.Continue(user_state, user_selector)) -> {
+  //               let new_state = State(..state, user_state: user_state)
+  //               case user_selector {
+  //                 Some(user_selector) -> {
+  //                   let selector =
+  //                     user_selector
+  //                     |> process.map_selector(UserMessage)
+  //                     |> process.merge_selector(process.map_selector(
+  //                       socket.selector(),
+  //                       from_socket_message,
+  //                     ))
+  //                   actor.Continue(new_state, Some(selector))
+  //                 }
+  //                 _ -> actor.continue(new_state)
+  //               }
+  //             }
+  //             Ok(actor.Stop(reason)) -> actor.Stop(reason)
+  //             Error(reason) -> {
+  //               logging.log(
+  //                 logging.Error,
+  //                 "Caught error in user handler: " <> string.inspect(reason),
+  //               )
+  //               actor.continue(state)
+  //             }
+  //           }
+  //         }
+  //         Err(reason) -> {
+  //           close_contexts(state.compression)
+  //           actor.Stop(process.Abnormal(string.inspect(reason)))
+  //         }
+  //         Data(bits) -> {
+  //           let assert Some(socket) = state.socket
+  //           let conn =
+  //             Connection(
+  //               socket,
+  //               transport,
+  //               option.map(state.compression, fn(context) { context.deflate }),
+  //             )
+  //           let #(frames, rest) =
+  //             websocket.get_messages(
+  //               bit_array.append(state.buffer, bits),
+  //               [],
+  //               option.map(state.compression, fn(context) { context.inflate }),
+  //             )
+  //           let frames =
+  //             websocket.aggregate_frames(frames, state.incomplete, [])
+  //           case frames {
+  //             Error(Nil) -> actor.continue(state)
+  //             Ok(frames) -> {
+  //               list.fold_until(frames, actor.continue(state), fn(acc, frame) {
+  //                 let assert actor.Continue(prev_state, _selector) = acc
+  //                 case handle_frame(builder, prev_state, conn, frame) {
+  //                   actor.Continue(..) as next -> list.Continue(next)
+  //                   actor.Stop(..) as err -> list.Stop(err)
+  //                 }
+  //               })
+  //             }
+  //           }
+  //           |> fn(next) {
+  //             case next {
+  //               actor.Stop(..) as stop -> {
+  //                 close_contexts(state.compression)
+  //                 stop
+  //               }
+  //               actor.Continue(state, selector) -> {
+  //                 let assert Ok(_) =
+  //                   transport.set_opts(
+  //                     transport,
+  //                     socket,
+  //                     socket.convert_options([Receive(Once)]),
+  //                   )
+  //                 actor.Continue(State(..state, buffer: rest), selector)
+  //               }
+  //             }
+  //           }
+  //         }
+  //         Closed -> {
+  //           logging.log(logging.Debug, "Received closed frame")
+  //           builder.on_close(state.user_state)
+  //           close_contexts(state.compression)
+  //           actor.Stop(process.Normal)
+  //         }
+  //         // TODO:  handle shutdown better?
+  //         Shutdown -> {
+  //           logging.log(logging.Debug, "Received shutdown messag")
+  //           close_contexts(state.compression)
+  //           actor.Stop(process.Normal)
+  //         }
+  //       }
+  //     },
+  //   ),
+  // )
 }
 
 fn handle_frame(
@@ -385,11 +602,11 @@ fn handle_frame(
   state: State(user_state, user_message),
   conn: Connection,
   frame: websocket.Frame,
-) -> actor.Next(InternalMessage(user_message), State(user_state, user_message)) {
+) -> actor.Next(State(user_state, user_message), InternalMessage(user_message)) {
   case frame {
     DataFrame(TextFrame(payload: data, ..)) -> {
       let assert Ok(str) = bit_array.to_string(data)
-      let res = rescue(fn() { builder.loop(Text(str), state.user_state, conn) })
+      let res = rescue(fn() { builder.loop(state.user_state, Text(str), conn) })
       case res {
         // TODO:  de-dupe this
         Ok(actor.Continue(user_state, user_selector)) -> {
@@ -399,10 +616,12 @@ fn handle_frame(
               let selector =
                 user_selector
                 |> process.map_selector(UserMessage)
-                |> process.merge_selector(process.map_selector(
-                  socket.selector(),
-                  from_socket_message,
-                ))
+                |> process.merge_selector(
+                  process.map_selector(socket.selector(), fn(msg) {
+                    let assert Ok(msg) = msg
+                    from_socket_message(msg)
+                  }),
+                )
               actor.Continue(new_state, Some(selector))
             }
             _ -> actor.continue(new_state)
@@ -420,7 +639,7 @@ fn handle_frame(
     }
     DataFrame(BinaryFrame(payload: data, ..)) -> {
       let res =
-        rescue(fn() { builder.loop(Binary(data), state.user_state, conn) })
+        rescue(fn() { builder.loop(state.user_state, Binary(data), conn) })
       case res {
         // TODO:  de-dupe this
         Ok(actor.Continue(user_state, user_selector)) -> {
@@ -430,10 +649,12 @@ fn handle_frame(
               let selector =
                 user_selector
                 |> process.map_selector(UserMessage)
-                |> process.merge_selector(process.map_selector(
-                  socket.selector(),
-                  from_socket_message,
-                ))
+                |> process.merge_selector(
+                  process.map_selector(socket.selector(), fn(msg) {
+                    let assert Ok(msg) = msg
+                    from_socket_message(msg)
+                  }),
+                )
               actor.Continue(new_state, Some(selector))
             }
             _ -> actor.continue(new_state)
