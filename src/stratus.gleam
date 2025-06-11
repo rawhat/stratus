@@ -48,6 +48,34 @@ fn from_socket_message(msg: SocketMessage) -> InternalMessage(user_message) {
   }
 }
 
+pub opaque type Next(state, user_message) {
+  Continue(state: state, selector: Option(Selector(user_message)))
+  NormalStop
+  AbnormalStop(reason: String)
+}
+
+pub fn continue(state: state) -> Next(state, user_message) {
+  Continue(state, None)
+}
+
+pub fn with_selector(
+  next: Next(state, user_message),
+  selector: Selector(user_message),
+) -> Next(state, user_message) {
+  case next {
+    Continue(state, _) -> Continue(state, Some(selector))
+    _ -> next
+  }
+}
+
+pub fn stop() -> Next(state, user_message) {
+  NormalStop
+}
+
+pub fn stop_abnormal(reason: String) -> Next(state, user_message) {
+  AbnormalStop(reason)
+}
+
 /// These are the messages emitted or received by the underlying process.  You
 /// should only need to interact with `Message` below.
 pub opaque type InternalMessage(user_message) {
@@ -72,7 +100,7 @@ pub opaque type Builder(state, user_message) {
     connect_timeout: Int,
     init: fn() -> #(state, Option(Selector(user_message))),
     loop: fn(state, Message(user_message), Connection) ->
-      actor.Next(state, user_message),
+      Next(state, user_message),
     on_close: fn(state) -> Nil,
     on_handshake_error: fn(Response(BitArray)) -> Nil,
   )
@@ -87,7 +115,7 @@ pub fn websocket(
   request req: Request(String),
   init init: fn() -> #(state, Option(Selector(user_message))),
   loop loop: fn(state, Message(user_message), Connection) ->
-    actor.Next(state, user_message),
+    Next(state, user_message),
 ) -> Builder(state, user_message) {
   Builder(
     request: req,
@@ -255,7 +283,7 @@ pub fn initialize(
             Protocol(_bits) | Sock(_reason) -> {
               let msg = "Failed to connect to server: " <> string.inspect(err)
               logging.log(logging.Error, msg)
-              actor.Stop(process.Abnormal(dynamic.from(message)))
+              actor.stop_abnormal(msg)
             }
             UpgradeFailed(resp) -> {
               builder.on_handshake_error(resp)
@@ -264,9 +292,7 @@ pub fn initialize(
                 "WebSocket handshake failed with status "
                   <> int.to_string(resp.status),
               )
-              actor.Stop(
-                process.Abnormal(dynamic.from("WebSocket handshake failed")),
-              )
+              actor.stop_abnormal("WebSocket handshake failed")
             }
           }
         })
@@ -286,7 +312,7 @@ pub fn initialize(
           })
         case res {
           // TODO:  de-dupe this
-          Ok(actor.Continue(user_state, user_selector)) -> {
+          Ok(Continue(user_state, user_selector)) -> {
             let new_state = State(..state, user_state: user_state)
             case user_selector {
               Some(user_selector) -> {
@@ -299,12 +325,15 @@ pub fn initialize(
                       from_socket_message(msg)
                     }),
                   )
-                actor.Continue(new_state, Some(selector))
+                new_state
+                |> actor.continue
+                |> actor.with_selector(selector)
               }
               _ -> actor.continue(new_state)
             }
           }
-          Ok(actor.Stop(reason)) -> actor.Stop(reason)
+          Ok(NormalStop) -> actor.stop()
+          Ok(AbnormalStop(reason)) -> actor.stop_abnormal(reason)
           Error(reason) -> {
             logging.log(
               logging.Error,
@@ -316,7 +345,7 @@ pub fn initialize(
       }
       Err(reason) -> {
         close_contexts(state.compression)
-        actor.Stop(process.Abnormal(dynamic.from(reason)))
+        actor.stop_abnormal(string.inspect(reason))
       }
       Data(bits) -> {
         let assert Some(socket) = state.socket
@@ -334,31 +363,39 @@ pub fn initialize(
           )
         let frames = websocket.aggregate_frames(frames, state.incomplete, [])
         case frames {
-          Error(Nil) -> actor.continue(state)
+          Error(Nil) -> continue(state)
           Ok(frames) -> {
-            list.fold_until(frames, actor.continue(state), fn(acc, frame) {
-              let assert actor.Continue(prev_state, _selector) = acc
+            list.fold_until(frames, continue(state), fn(acc, frame) {
+              let assert Continue(prev_state, _selector) = acc
               case handle_frame(builder, prev_state, conn, frame) {
-                actor.Continue(..) as next -> list.Continue(next)
-                actor.Stop(..) as err -> list.Stop(err)
+                Continue(..) as next -> list.Continue(next)
+                err -> list.Stop(err)
               }
             })
           }
         }
         |> fn(next) {
           case next {
-            actor.Stop(..) as stop -> {
-              close_contexts(state.compression)
-              stop
-            }
-            actor.Continue(state, selector) -> {
+            Continue(state, selector) -> {
               let assert Ok(_) =
                 transport.set_opts(
                   transport,
                   socket,
                   socket.convert_options([Receive(Once)]),
                 )
-              actor.Continue(State(..state, buffer: rest), selector)
+              let next = actor.continue(State(..state, buffer: rest))
+              case selector {
+                Some(selector) -> actor.with_selector(next, selector)
+                _ -> next
+              }
+            }
+            NormalStop -> {
+              close_contexts(state.compression)
+              actor.stop()
+            }
+            AbnormalStop(reason) -> {
+              close_contexts(state.compression)
+              actor.stop_abnormal(reason)
             }
           }
         }
@@ -367,234 +404,17 @@ pub fn initialize(
         logging.log(logging.Debug, "Received closed frame")
         builder.on_close(state.user_state)
         close_contexts(state.compression)
-        actor.Stop(process.Normal)
+        actor.stop()
       }
       // TODO:  handle shutdown better?
       Shutdown -> {
         logging.log(logging.Debug, "Received shutdown messag")
         close_contexts(state.compression)
-        actor.Stop(process.Normal)
+        actor.stop()
       }
     }
   })
   |> actor.start
-  // actor.start_spec(
-  //   actor.Spec(
-  //     init: fn() {
-  //       let subj = process.new_subject()
-  //       let started_selector =
-  //         process.selecting(process.new_selector(), subj, function.identity)
-  //       logging.log(logging.Debug, "Calling user initializer")
-  //       let #(user_state, user_selector) = builder.init()
-  //       let selector = case user_selector {
-  //         Some(selector) -> {
-  //           selector
-  //           |> process.map_selector(UserMessage)
-  //           |> process.merge_selector(started_selector)
-  //           |> process.merge_selector(process.map_selector(
-  //             socket.selector(),
-  //             from_socket_message,
-  //           ))
-  //         }
-  //         _ ->
-  //           started_selector
-  //           |> process.merge_selector(process.map_selector(
-  //             socket.selector(),
-  //             from_socket_message,
-  //           ))
-  //       }
-  //       process.send(subj, Started)
-  //       actor.Ready(
-  //         State(
-  //           buffer: <<>>,
-  //           incomplete: None,
-  //           self: subj,
-  //           socket: None,
-  //           user_state: user_state,
-  //           compression: None,
-  //         ),
-  //         selector,
-  //       )
-  //     },
-  //     init_timeout: 1000,
-  //     loop: fn(msg, state) {
-  //       case msg {
-  //         Started -> {
-  //           logging.log(
-  //             logging.Debug,
-  //             "Attempting handshake to "
-  //               <> uri.to_string(request.to_uri(builder.request)),
-  //           )
-  //           perform_handshake(
-  //             builder.request,
-  //             transport,
-  //             builder.connect_timeout,
-  //           )
-  //           |> result.then(fn(pair) {
-  //             logging.log(logging.Debug, "Handshake successful")
-  //             transport.set_opts(
-  //               transport,
-  //               pair.0,
-  //               socket.convert_options([Receive(Once)]),
-  //             )
-  //             |> result.replace(pair)
-  //             |> result.map_error(Sock)
-  //           })
-  //           |> result.map(fn(pair) {
-  //             let #(socket, resp, buffer) = pair
-  //             logging.log(
-  //               logging.Debug,
-  //               "WebSocket process ready to start receiving",
-  //             )
-  //             let _ = case buffer {
-  //               <<>> -> Nil
-  //               data -> process.send(state.self, Data(data))
-  //             }
-  //             let extensions =
-  //               resp
-  //               |> response.get_header("sec-websocket-extensions")
-  //               |> result.map(string.split(_, ";"))
-  //               |> result.unwrap([])
-  //             let context = case websocket.has_deflate(extensions) {
-  //               True -> Some(compression.init())
-  //               False -> None
-  //             }
-  //             actor.continue(
-  //               State(
-  //                 ..state,
-  //                 socket: Some(socket),
-  //                 buffer: buffer,
-  //                 compression: context,
-  //               ),
-  //             )
-  //           })
-  //           |> result.map_error(fn(err) {
-  //             case err {
-  //               Protocol(_bits) | Sock(_reason) -> {
-  //                 let msg =
-  //                   "Failed to connect to server: " <> string.inspect(err)
-  //                 logging.log(logging.Error, msg)
-  //                 actor.Stop(process.Abnormal(msg))
-  //               }
-  //               UpgradeFailed(resp) -> {
-  //                 builder.on_handshake_error(resp)
-  //                 logging.log(
-  //                   logging.Error,
-  //                   "WebSocket handshake failed with status "
-  //                     <> int.to_string(resp.status),
-  //                 )
-  //                 actor.Stop(process.Abnormal("WebSocket handshake failed"))
-  //               }
-  //             }
-  //           })
-  //           |> result.unwrap_both
-  //         }
-  //         UserMessage(user_message) -> {
-  //           let assert Some(socket) = state.socket
-  //           let conn =
-  //             Connection(
-  //               socket,
-  //               transport,
-  //               option.map(state.compression, fn(context) { context.deflate }),
-  //             )
-  //           let res =
-  //             rescue(fn() {
-  //               builder.loop(User(user_message), state.user_state, conn)
-  //             })
-  //           case res {
-  //             // TODO:  de-dupe this
-  //             Ok(actor.Continue(user_state, user_selector)) -> {
-  //               let new_state = State(..state, user_state: user_state)
-  //               case user_selector {
-  //                 Some(user_selector) -> {
-  //                   let selector =
-  //                     user_selector
-  //                     |> process.map_selector(UserMessage)
-  //                     |> process.merge_selector(process.map_selector(
-  //                       socket.selector(),
-  //                       from_socket_message,
-  //                     ))
-  //                   actor.Continue(new_state, Some(selector))
-  //                 }
-  //                 _ -> actor.continue(new_state)
-  //               }
-  //             }
-  //             Ok(actor.Stop(reason)) -> actor.Stop(reason)
-  //             Error(reason) -> {
-  //               logging.log(
-  //                 logging.Error,
-  //                 "Caught error in user handler: " <> string.inspect(reason),
-  //               )
-  //               actor.continue(state)
-  //             }
-  //           }
-  //         }
-  //         Err(reason) -> {
-  //           close_contexts(state.compression)
-  //           actor.Stop(process.Abnormal(string.inspect(reason)))
-  //         }
-  //         Data(bits) -> {
-  //           let assert Some(socket) = state.socket
-  //           let conn =
-  //             Connection(
-  //               socket,
-  //               transport,
-  //               option.map(state.compression, fn(context) { context.deflate }),
-  //             )
-  //           let #(frames, rest) =
-  //             websocket.get_messages(
-  //               bit_array.append(state.buffer, bits),
-  //               [],
-  //               option.map(state.compression, fn(context) { context.inflate }),
-  //             )
-  //           let frames =
-  //             websocket.aggregate_frames(frames, state.incomplete, [])
-  //           case frames {
-  //             Error(Nil) -> actor.continue(state)
-  //             Ok(frames) -> {
-  //               list.fold_until(frames, actor.continue(state), fn(acc, frame) {
-  //                 let assert actor.Continue(prev_state, _selector) = acc
-  //                 case handle_frame(builder, prev_state, conn, frame) {
-  //                   actor.Continue(..) as next -> list.Continue(next)
-  //                   actor.Stop(..) as err -> list.Stop(err)
-  //                 }
-  //               })
-  //             }
-  //           }
-  //           |> fn(next) {
-  //             case next {
-  //               actor.Stop(..) as stop -> {
-  //                 close_contexts(state.compression)
-  //                 stop
-  //               }
-  //               actor.Continue(state, selector) -> {
-  //                 let assert Ok(_) =
-  //                   transport.set_opts(
-  //                     transport,
-  //                     socket,
-  //                     socket.convert_options([Receive(Once)]),
-  //                   )
-  //                 actor.Continue(State(..state, buffer: rest), selector)
-  //               }
-  //             }
-  //           }
-  //         }
-  //         Closed -> {
-  //           logging.log(logging.Debug, "Received closed frame")
-  //           builder.on_close(state.user_state)
-  //           close_contexts(state.compression)
-  //           actor.Stop(process.Normal)
-  //         }
-  //         // TODO:  handle shutdown better?
-  //         Shutdown -> {
-  //           logging.log(logging.Debug, "Received shutdown messag")
-  //           close_contexts(state.compression)
-  //           actor.Stop(process.Normal)
-  //         }
-  //       }
-  //     },
-  //   ),
-  // )
 }
 
 fn handle_frame(
@@ -602,14 +422,14 @@ fn handle_frame(
   state: State(user_state, user_message),
   conn: Connection,
   frame: websocket.Frame,
-) -> actor.Next(State(user_state, user_message), InternalMessage(user_message)) {
+) -> Next(State(user_state, user_message), InternalMessage(user_message)) {
   case frame {
     DataFrame(TextFrame(payload: data, ..)) -> {
       let assert Ok(str) = bit_array.to_string(data)
       let res = rescue(fn() { builder.loop(state.user_state, Text(str), conn) })
       case res {
         // TODO:  de-dupe this
-        Ok(actor.Continue(user_state, user_selector)) -> {
+        Ok(Continue(user_state, user_selector)) -> {
           let new_state = State(..state, user_state: user_state)
           case user_selector {
             Some(user_selector) -> {
@@ -622,18 +442,19 @@ fn handle_frame(
                     from_socket_message(msg)
                   }),
                 )
-              actor.Continue(new_state, Some(selector))
+              Continue(new_state, Some(selector))
             }
-            _ -> actor.continue(new_state)
+            _ -> continue(new_state)
           }
         }
-        Ok(actor.Stop(reason)) -> actor.Stop(reason)
+        Ok(NormalStop) -> NormalStop
+        Ok(AbnormalStop(reason)) -> AbnormalStop(reason)
         Error(reason) -> {
           logging.log(
             logging.Error,
             "Caught error in user handler: " <> string.inspect(reason),
           )
-          actor.continue(state)
+          continue(state)
         }
       }
     }
@@ -642,7 +463,7 @@ fn handle_frame(
         rescue(fn() { builder.loop(state.user_state, Binary(data), conn) })
       case res {
         // TODO:  de-dupe this
-        Ok(actor.Continue(user_state, user_selector)) -> {
+        Ok(Continue(user_state, user_selector)) -> {
           let new_state = State(..state, user_state: user_state)
           case user_selector {
             Some(user_selector) -> {
@@ -655,18 +476,19 @@ fn handle_frame(
                     from_socket_message(msg)
                   }),
                 )
-              actor.Continue(new_state, Some(selector))
+              Continue(new_state, Some(selector))
             }
-            _ -> actor.continue(new_state)
+            _ -> continue(new_state)
           }
         }
-        Ok(actor.Stop(reason)) -> actor.Stop(reason)
+        Ok(NormalStop) -> NormalStop
+        Ok(AbnormalStop(reason)) -> AbnormalStop(reason)
         Error(reason) -> {
           logging.log(
             logging.Error,
             "Caught error in user handler: " <> string.inspect(reason),
           )
-          actor.continue(state)
+          continue(state)
         }
       }
     }
@@ -685,10 +507,10 @@ fn handle_frame(
           )
       }
       let _ = transport.send(conn.transport, conn.socket, frame)
-      actor.continue(state)
+      continue(state)
     }
     Control(PongFrame(..)) -> {
-      actor.continue(state)
+      continue(state)
     }
     Control(CloseFrame(length, payload)) -> {
       let size = length - 2
@@ -700,10 +522,10 @@ fn handle_frame(
         _ -> Nil
       }
       builder.on_close(state.user_state)
-      actor.Stop(process.Normal)
+      NormalStop
     }
     Continuation(..) -> {
-      actor.continue(state)
+      continue(state)
     }
   }
 }

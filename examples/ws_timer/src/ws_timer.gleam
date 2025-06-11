@@ -4,7 +4,6 @@ import gleam/function
 import gleam/http/request
 import gleam/io
 import gleam/option.{None}
-import gleam/otp/actor
 import gleam/string
 import logging
 import repeatedly
@@ -40,20 +39,20 @@ pub fn main() {
         case msg {
           stratus.Text(msg) -> {
             logging.log(logging.Info, "Got a message: " <> msg)
-            actor.continue(state)
+            stratus.continue(state)
           }
           stratus.User(TimeUpdated(msg)) -> {
             let assert Ok(_resp) = stratus.send_text_message(conn, msg)
-            actor.continue(state)
+            stratus.continue(state)
           }
           stratus.User(DoTheThing(resp)) -> {
             process.send(resp, 1234)
-            actor.continue(state)
+            stratus.continue(state)
           }
-          stratus.Binary(_msg) -> actor.continue(state)
+          stratus.Binary(_msg) -> stratus.continue(state)
           stratus.User(Close) -> {
             let assert Ok(_) = stratus.close(conn)
-            actor.Stop(process.Normal)
+            stratus.stop()
           }
         }
       },

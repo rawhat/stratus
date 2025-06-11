@@ -48,23 +48,26 @@ pub const default_options = [
   Nodelay(True),
 ]
 
+@external(erlang, "gleam@function", "identity")
+fn from(value: a) -> Dynamic
+
 pub fn convert_options(options: List(Options)) -> List(TcpOption) {
   let active = atom.create("active")
   list.map(options, fn(opt) {
     case opt {
-      Receive(Count(count)) -> #(active, dynamic.from(count))
-      Receive(Once) -> #(active, dynamic.from(atom.create("once")))
-      Receive(Pull) -> #(active, dynamic.from(False))
-      Receive(All) -> #(active, dynamic.from(True))
-      PacketsOf(Binary) -> #(atom.create("mode"), dynamic.from(Binary))
-      PacketsOf(List) -> #(atom.create("mode"), dynamic.from(List))
+      Receive(Count(count)) -> #(active, dynamic.int(count))
+      Receive(Once) -> #(active, from(atom.create("once")))
+      Receive(Pull) -> #(active, dynamic.bool(False))
+      Receive(All) -> #(active, dynamic.bool(True))
+      PacketsOf(Binary) -> #(atom.create("mode"), from(Binary))
+      PacketsOf(List) -> #(atom.create("mode"), from(List))
       Cacerts(data) -> #(atom.create("cacerts"), data)
-      Nodelay(bool) -> #(atom.create("nodelay"), dynamic.from(bool))
-      Reuseaddr(bool) -> #(atom.create("reuseaddr"), dynamic.from(bool))
-      SendTimeout(int) -> #(atom.create("send_timeout"), dynamic.from(int))
+      Nodelay(bool) -> #(atom.create("nodelay"), dynamic.bool(bool))
+      Reuseaddr(bool) -> #(atom.create("reuseaddr"), dynamic.bool(bool))
+      SendTimeout(int) -> #(atom.create("send_timeout"), dynamic.int(int))
       SendTimeoutClose(bool) -> #(
         atom.create("send_timeout_close"),
-        dynamic.from(bool),
+        dynamic.bool(bool),
       )
       CustomizeHostnameCheck(funcs) -> #(
         atom.create("customize_hostname_check"),
