@@ -424,7 +424,7 @@ fn handle_frame(
   frame: websocket.Frame,
 ) -> Next(State(user_state, user_message), InternalMessage(user_message)) {
   case frame {
-    DataFrame(TextFrame(payload: data, ..)) -> {
+    DataFrame(TextFrame(payload: data)) -> {
       let assert Ok(str) = bit_array.to_string(data)
       let res = rescue(fn() { builder.loop(state.user_state, Text(str), conn) })
       case res {
@@ -458,7 +458,7 @@ fn handle_frame(
         }
       }
     }
-    DataFrame(BinaryFrame(payload: data, ..)) -> {
+    DataFrame(BinaryFrame(payload: data)) -> {
       let res =
         rescue(fn() { builder.loop(state.user_state, Binary(data), conn) })
       case res {
@@ -492,17 +492,17 @@ fn handle_frame(
         }
       }
     }
-    Control(PingFrame(payload, payload_length)) -> {
+    Control(PingFrame(payload)) -> {
       let frame = case conn.context {
         Some(context) ->
           websocket.compressed_frame_to_bytes_tree(
-            websocket.Control(websocket.PongFrame(payload, payload_length)),
+            websocket.Control(websocket.PongFrame(payload)),
             context,
             Some(<<0:unit(8)-size(4)>>),
           )
         None ->
           websocket.frame_to_bytes_tree(
-            websocket.Control(websocket.PongFrame(payload, payload_length)),
+            websocket.Control(websocket.PongFrame(payload)),
             Some(<<0:unit(8)-size(4)>>),
           )
       }
@@ -512,15 +512,11 @@ fn handle_frame(
     Control(PongFrame(..)) -> {
       continue(state)
     }
-    Control(CloseFrame(length, payload)) -> {
-      let size = length - 2
-      case payload {
-        <<_reason:int-size(2)-unit(8), message:bytes-size(size)>> -> {
-          let msg = "WebSocket closing: " <> string.inspect(message)
-          logging.log(logging.Debug, msg)
-        }
-        _ -> Nil
-      }
+    Control(CloseFrame(reason)) -> {
+      logging.log(
+        logging.Debug,
+        "WebSocket closing: " <> string.inspect(reason),
+      )
       builder.on_close(state.user_state)
       NormalStop
     }
@@ -581,13 +577,13 @@ pub fn send_ping(conn: Connection, data: BitArray) -> Result(Nil, SocketReason) 
   let frame = case conn.context {
     Some(context) ->
       websocket.compressed_frame_to_bytes_tree(
-        websocket.Control(websocket.PingFrame(size, data)),
+        websocket.Control(websocket.PingFrame(data)),
         context,
         Some(mask),
       )
     None ->
       websocket.frame_to_bytes_tree(
-        websocket.Control(websocket.PingFrame(size, data)),
+        websocket.Control(websocket.PingFrame(data)),
         Some(mask),
       )
   }
@@ -596,19 +592,47 @@ pub fn send_ping(conn: Connection, data: BitArray) -> Result(Nil, SocketReason) 
 
 /// This will close the WebSocket connection.
 pub fn close(conn: Connection) -> Result(Nil, SocketReason) {
-  let frame = case conn.context {
-    Some(context) ->
-      websocket.compressed_frame_to_bytes_tree(
-        websocket.Control(websocket.CloseFrame(0, <<>>)),
-        context,
-        Some(crypto.strong_random_bytes(4)),
-      )
-    None ->
-      websocket.frame_to_bytes_tree(
-        websocket.Control(websocket.CloseFrame(0, <<>>)),
-        Some(crypto.strong_random_bytes(4)),
-      )
+  close_with_reason(conn, Normal(body: <<>>))
+}
+
+pub type CloseReason {
+  Normal(body: BitArray)
+  GoingAway(body: BitArray)
+  ProtocolError(body: BitArray)
+  UnexpectedDataType(body: BitArray)
+  InconsistentDataType(body: BitArray)
+  PolicyViolation(body: BitArray)
+  MessageTooBig(body: BitArray)
+  MissingExtensions(body: BitArray)
+  UnexpectedCondition(body: BitArray)
+}
+
+fn convert_close_reason(reason: CloseReason) -> websocket.CloseReason {
+  case reason {
+    GoingAway(body:) -> websocket.GoingAway(body:)
+    InconsistentDataType(body:) -> websocket.InconsistentDataType(body:)
+    MessageTooBig(body:) -> websocket.MessageTooBig(body:)
+    MissingExtensions(body:) -> websocket.MissingExtensions(body:)
+    Normal(body:) -> websocket.Normal(body:)
+    PolicyViolation(body:) -> websocket.PolicyViolation(body:)
+    ProtocolError(body:) -> websocket.ProtocolError(body:)
+    UnexpectedCondition(body:) -> websocket.UnexpectedCondition(body:)
+    UnexpectedDataType(body:) -> websocket.UnexpectedDataType(body:)
   }
+}
+
+/// This closes the WebSocket connection with a particular close reason.
+pub fn close_with_reason(
+  conn: Connection,
+  reason: CloseReason,
+) -> Result(Nil, SocketReason) {
+  let reason = convert_close_reason(reason)
+  let mask = crypto.strong_random_bytes(4)
+  let frame =
+    websocket.frame_to_bytes_tree(
+      websocket.Control(websocket.CloseFrame(reason)),
+      Some(mask),
+    )
   transport.send(conn.transport, conn.socket, frame)
 }
 

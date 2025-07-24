@@ -41,7 +41,8 @@ pub fn main() {
           }
           stratus.Binary(_msg) -> stratus.continue(state)
           stratus.User(Close) -> {
-            let assert Ok(_) = stratus.close(conn)
+            let assert Ok(_) =
+              stratus.close_with_reason(conn, stratus.GoingAway(<<"goodbye">>))
             stratus.stop()
           }
         }
