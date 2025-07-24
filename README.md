@@ -19,13 +19,14 @@ gleam add stratus
 ## Example
 
 ```gleam
-import birl
 import gleam/erlang/process.{type Subject}
 import gleam/function
 import gleam/http/request
 import gleam/io
 import gleam/option.{None}
 import gleam/string
+import gleam/time/calendar
+import gleam/time/timestamp
 import logging
 import repeatedly
 import stratus
@@ -36,20 +37,9 @@ pub type Msg {
   DoTheThing(Subject(Int))
 }
 
-pub type LogLevel {
-  Debug
-}
-
-pub type Log {
-  Level
-}
-
-@external(erlang, "logger", "set_primary_config")
-fn set_logger_level(log: Log, level: LogLevel) -> Nil
-
 pub fn main() {
   logging.configure()
-  set_logger_level(Level, Debug)
+  logging.set_level(logging.Debug)
   let assert Ok(req) =
     request.to("http://localhost:3000/ws?hello=world&value=123")
   let builder =
@@ -84,8 +74,8 @@ pub fn main() {
 
   let timer =
     repeatedly.call(1000, Nil, fn(_state, _count_) {
-      birl.now()
-      |> birl.to_iso8601
+      timestamp.system_time()
+      |> timestamp.to_rfc3339(calendar.local_offset())
       |> TimeUpdated
       |> stratus.to_user_message
       |> process.send(subj.data, _)

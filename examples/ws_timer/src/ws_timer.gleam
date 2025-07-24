@@ -16,20 +16,9 @@ pub type Msg {
   DoTheThing(Subject(Int))
 }
 
-pub type LogLevel {
-  Debug
-}
-
-pub type Log {
-  Level
-}
-
-@external(erlang, "logger", "set_primary_config")
-fn set_logger_level(log: Log, level: LogLevel) -> Nil
-
 pub fn main() {
   logging.configure()
-  set_logger_level(Level, Debug)
+  logging.set_level(logging.Debug)
   let assert Ok(req) =
     request.to("http://localhost:3000/ws?hello=world&value=123")
   let builder =
