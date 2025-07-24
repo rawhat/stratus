@@ -539,8 +539,8 @@ fn handle_frame(
 ///   MyMessage(some_data)
 ///   |> stratus.to_user_message
 ///   |> process.send(stratus_subject, _)
-///   // using `process.try_call`
-///   process.try_call(stratus_subject, fn(subj) {
+///   // using `process.call`
+///   process.call(stratus_subject, fn(subj) {
 ///     stratus.to_user_message(MyMessage(some_data, subj))
 ///   })
 /// ```
@@ -650,13 +650,18 @@ fn make_upgrade(req: Request(String)) -> BytesTree {
       }
     }
 
+  let port =
+    req.port
+    |> option.map(fn(port) { ":" <> int.to_string(port) })
+    |> option.unwrap("")
+
   bytes_tree.new()
   |> bytes_tree.append_string("GET " <> path <> query <> " HTTP/1.1\r\n")
-  |> bytes_tree.append_string("host: " <> req.host <> "\r\n")
+  |> bytes_tree.append_string("host: " <> req.host <> port <> "\r\n")
   |> bytes_tree.append_string("upgrade: websocket\r\n")
   |> bytes_tree.append_string("connection: upgrade\r\n")
   |> bytes_tree.append_string(
-    "sec-websocket-key: " <> websocket.client_key <> "\r\n",
+    "sec-websocket-key: " <> websocket.make_client_key() <> "\r\n",
   )
   |> bytes_tree.append_string("sec-websocket-version: 13\r\n")
   |> bytes_tree.append_string(
