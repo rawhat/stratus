@@ -240,7 +240,7 @@ pub fn initialize(
             <> uri.to_string(request.to_uri(builder.request)),
         )
         perform_handshake(builder.request, transport, builder.connect_timeout)
-        |> result.then(fn(pair) {
+        |> result.try(fn(pair) {
           logging.log(logging.Debug, "Handshake successful")
           transport.set_opts(
             transport,
@@ -739,12 +739,12 @@ fn perform_handshake(
   resp
   |> gramps_http.read_response
   |> result.map_error(fn(_err) { Protocol(resp) })
-  |> result.then(fn(pair) {
+  |> result.try(fn(pair) {
     let #(resp, body) = pair
     let body_size =
       resp.headers
       |> list.key_find("content-length")
-      |> result.then(int.parse)
+      |> result.try(int.parse)
       |> result.unwrap(0)
     case read_body(transport, socket, timeout, body_size, body) {
       Ok(#(body, rest)) -> {
@@ -753,7 +753,7 @@ fn perform_handshake(
       Error(reason) -> Error(Sock(reason))
     }
   })
-  |> result.then(fn(pair) {
+  |> result.try(fn(pair) {
     let #(resp, rest) = pair
     case resp.status {
       101 -> Ok(#(socket, resp, rest))

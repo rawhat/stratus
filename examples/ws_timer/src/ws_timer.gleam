@@ -1,10 +1,11 @@
-import birl
 import gleam/erlang/process.{type Subject}
 import gleam/function
 import gleam/http/request
 import gleam/io
 import gleam/option.{None}
 import gleam/string
+import gleam/time/calendar
+import gleam/time/timestamp
 import logging
 import repeatedly
 import stratus
@@ -63,8 +64,8 @@ pub fn main() {
 
   let timer =
     repeatedly.call(1000, Nil, fn(_state, _count_) {
-      birl.now()
-      |> birl.to_iso8601
+      timestamp.system_time()
+      |> timestamp.to_rfc3339(calendar.local_offset())
       |> TimeUpdated
       |> stratus.to_user_message
       |> process.send(subj.data, _)

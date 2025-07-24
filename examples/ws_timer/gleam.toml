@@ -17,10 +17,10 @@ gleam_stdlib = "~> 0.34 or ~> 1.0"
 stratus = { path = "../.." }
 gleam_otp = ">= 1.0.0 and < 2.0.0"
 repeatedly = "~> 2.1"
-birl = "~> 1.5"
 gleam_erlang = ">= 1.0.0 and < 2.0.0"
 gleam_http = ">= 4.0.0 and < 5.0.0"
 logging = "~> 1.0"
+gleam_time = ">= 1.4.0 and < 2.0.0"
 
 [dev-dependencies]
 gleeunit = "~> 1.0"
