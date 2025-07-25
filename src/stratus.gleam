@@ -684,6 +684,13 @@ pub type CloseReason {
   MessageTooBig(body: BitArray)
   MissingExtensions(body: BitArray)
   UnexpectedCondition(body: BitArray)
+  /// Usually used for `4000` codes.
+  CustomCloseReason(
+    /// If `code > 5000`, then it will be treated like a `Normal` close reason.
+    /// See https://hexdocs.pm/gramps/gramps/websocket.html#CloseReason.
+    code: Int,
+    body: BitArray,
+  )
 }
 
 fn convert_close_reason(reason: CloseReason) -> websocket.CloseReason {
@@ -697,6 +704,7 @@ fn convert_close_reason(reason: CloseReason) -> websocket.CloseReason {
     ProtocolError(body:) -> websocket.ProtocolError(body:)
     UnexpectedCondition(body:) -> websocket.UnexpectedCondition(body:)
     UnexpectedDataType(body:) -> websocket.UnexpectedDataType(body:)
+    CustomCloseReason(code:, body:) -> websocket.CustomCloseReason(code:, body:)
   }
 }
 
