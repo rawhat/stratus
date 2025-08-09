@@ -44,7 +44,10 @@ pub fn main() {
     request.to("http://localhost:3000/ws?hello=world&value=123")
   let assert Ok(subj) =
     // NOTE:  If you need to do something in your startup, you can use this
-    // stratus.new_with_initialiser(req, fn() { Ok(stratus.initialised(Nil)) })
+    //
+    //  stratus.initialised(some_state)
+    //  |> stratus.selecting(my_selector)
+    //  |> Ok
     stratus.new(req, Nil)
     |> stratus.on_message(fn(state, msg, conn) {
       case msg {
