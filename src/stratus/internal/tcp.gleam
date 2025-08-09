@@ -1,5 +1,6 @@
 import gleam/bytes_tree.{type BytesTree}
 import gleam/erlang/charlist.{type Charlist}
+import gleam/erlang/process.{type Pid}
 import stratus/internal/socket.{
   type Shutdown, type Socket, type SocketReason, type TcpOption,
 }
@@ -32,4 +33,10 @@ pub fn receive_timeout(
 pub fn set_opts(
   socket: Socket,
   opts: List(TcpOption),
+) -> Result(Nil, SocketReason)
+
+@external(erlang, "stratus_ffi", "tcp_controlling_process")
+pub fn controlling_process(
+  socket: Socket,
+  new_owner: Pid,
 ) -> Result(Nil, SocketReason)

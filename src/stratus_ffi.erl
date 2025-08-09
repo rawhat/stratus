@@ -1,7 +1,7 @@
 -module(stratus_ffi).
 
 -export([tcp_shutdown/2, tcp_send/2, ssl_shutdown/2, ssl_send/2, tcp_set_opts/2,
-         ssl_set_opts/2, ssl_start/0, custom_sni_matcher/0, rescue/1]).
+         ssl_set_opts/2, ssl_start/0, custom_sni_matcher/0, ssl_controlling_process/2, tcp_controlling_process/2 ]).
 
 tcp_shutdown(Socket, How) ->
   case gen_tcp:shutdown(Socket, How) of
@@ -64,10 +64,14 @@ custom_sni_matcher() ->
   {customize_hostname_check,
    [{match_fun, public_key:pkix_verify_hostname_match_fun(https)}]}.
 
-rescue(Fn) ->
-  try
-    Res = Fn(),
-    {ok, Res}
-  catch
-    Error -> {error, Error}
+ssl_controlling_process(Socket, NewOwner) ->
+  case ssl:controlling_process(Socket, NewOwner) of
+    ok -> {ok, nil};
+    Error -> Error
+  end.
+
+tcp_controlling_process(Socket, NewOwner) ->
+  case gen_tcp:controlling_process(Socket, NewOwner) of
+    ok -> {ok, nil};
+    Error -> Error
   end.
