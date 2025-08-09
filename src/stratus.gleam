@@ -669,12 +669,8 @@ pub fn send_ping(conn: Connection, data: BitArray) -> Result(Nil, SocketReason) 
   |> result.map_error(convert_socket_reason)
 }
 
-/// This will close the WebSocket connection.
-pub fn close(conn: Connection) -> Result(Nil, SocketReason) {
-  close_with_reason(conn, Normal(body: <<>>))
-}
-
-pub type CloseReason {
+pub opaque type CloseReason {
+  NotProvided
   Normal(body: BitArray)
   GoingAway(body: BitArray)
   ProtocolError(body: BitArray)
@@ -684,17 +680,12 @@ pub type CloseReason {
   MessageTooBig(body: BitArray)
   MissingExtensions(body: BitArray)
   UnexpectedCondition(body: BitArray)
-  /// Usually used for `4000` codes.
-  CustomCloseReason(
-    /// If `code > 5000`, then it will be treated like a `Normal` close reason.
-    /// See https://hexdocs.pm/gramps/gramps/websocket.html#CloseReason.
-    code: Int,
-    body: BitArray,
-  )
+  CustomCloseReason(code: Int, body: BitArray)
 }
 
 fn convert_close_reason(reason: CloseReason) -> websocket.CloseReason {
   case reason {
+    NotProvided -> websocket.NotProvided
     GoingAway(body:) -> websocket.GoingAway(body:)
     InconsistentDataType(body:) -> websocket.InconsistentDataType(body:)
     MessageTooBig(body:) -> websocket.MessageTooBig(body:)
@@ -708,7 +699,67 @@ fn convert_close_reason(reason: CloseReason) -> websocket.CloseReason {
   }
 }
 
-/// This closes the WebSocket connection with a particular close reason.
+/// Closes without a reason.
+pub fn close(conn: Connection) {
+  close_with_reason(conn, NotProvided)
+}
+
+/// Status code: 1000
+pub fn close_reason_normal(body: BitArray) -> CloseReason {
+  Normal(body:)
+}
+
+/// Status code: 1001
+pub fn close_reason_going_away(body: BitArray) -> CloseReason {
+  GoingAway(body:)
+}
+
+/// Status code: 1002
+pub fn close_reason_protocol_error(body: BitArray) -> CloseReason {
+  ProtocolError(body:)
+}
+
+/// Status code: 1003
+pub fn close_reason_unexpected_data_type(body: BitArray) -> CloseReason {
+  UnexpectedDataType(body:)
+}
+
+/// Status code: 1007
+pub fn close_reason_inconsistent_data_type(body: BitArray) -> CloseReason {
+  InconsistentDataType(body:)
+}
+
+/// Status code: 1008
+pub fn close_reason_policy_violation(body: BitArray) -> CloseReason {
+  PolicyViolation(body:)
+}
+
+/// Status code: 1009
+pub fn close_reason_message_too_big(body: BitArray) -> CloseReason {
+  MessageTooBig(body:)
+}
+
+/// Status code: 1010
+pub fn close_reason_missing_extensions(body: BitArray) -> CloseReason {
+  MissingExtensions(body:)
+}
+
+/// Status code: 1011
+pub fn close_reason_unexpected_condition(body: BitArray) -> CloseReason {
+  UnexpectedCondition(body:)
+}
+
+/// Accepts codes from 0 to 4999.
+pub fn close_reason_custom(
+  code: Int,
+  body: BitArray,
+) -> Result(CloseReason, Nil) {
+  case code >= 5000 {
+    True -> Error(Nil)
+    False -> Ok(CustomCloseReason(code:, body:))
+  }
+}
+
 pub fn close_with_reason(
   conn: Connection,
   reason: CloseReason,
