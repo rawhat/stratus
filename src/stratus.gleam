@@ -259,7 +259,7 @@ pub fn start(
     |> result.map(string.split(_, "; "))
     |> result.unwrap([])
 
-  let context_takeovers = websocket.get_client_takeovers(extensions)
+  let context_takeovers = websocket.get_context_takeovers(extensions)
 
   let assert Ok(_) =
     transport.set_opts(
