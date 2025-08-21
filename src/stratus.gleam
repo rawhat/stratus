@@ -1,5 +1,6 @@
 import exception
 import gleam/bit_array
+import gleam/bool
 import gleam/bytes_tree.{type BytesTree}
 import gleam/crypto
 import gleam/erlang/charlist
@@ -42,6 +43,11 @@ pub type SocketReason {
   NotOwner
   Badarg
   Posix(String)
+}
+
+pub type CustomCloseError {
+  SocketFail(SocketReason)
+  InvalidCode
 }
 
 fn convert_socket_reason(reason: socket.SocketReason) -> SocketReason {
@@ -212,7 +218,7 @@ pub type InitializationError {
   HandshakeFailed(HandshakeError)
   // The actor failed to start, most likely due to a timeout in your `init`
   ActorFailed(actor.StartError)
-  // 
+  //
   FailedToTransferSocket(SocketReason)
 }
 
@@ -614,12 +620,8 @@ pub fn send_ping(conn: Connection, data: BitArray) -> Result(Nil, SocketReason) 
   |> result.map_error(convert_socket_reason)
 }
 
-/// This will close the WebSocket connection.
-pub fn close(conn: Connection) -> Result(Nil, SocketReason) {
-  close_with_reason(conn, Normal(body: <<>>))
-}
-
-pub type CloseReason {
+pub opaque type CloseReason {
+  NotProvided
   Normal(body: BitArray)
   GoingAway(body: BitArray)
   ProtocolError(body: BitArray)
@@ -629,10 +631,12 @@ pub type CloseReason {
   MessageTooBig(body: BitArray)
   MissingExtensions(body: BitArray)
   UnexpectedCondition(body: BitArray)
+  CustomCloseReason(code: Int, body: BitArray)
 }
 
 fn convert_close_reason(reason: CloseReason) -> websocket.CloseReason {
   case reason {
+    NotProvided -> websocket.NotProvided
     GoingAway(body:) -> websocket.GoingAway(body:)
     InconsistentDataType(body:) -> websocket.InconsistentDataType(body:)
     MessageTooBig(body:) -> websocket.MessageTooBig(body:)
@@ -642,11 +646,73 @@ fn convert_close_reason(reason: CloseReason) -> websocket.CloseReason {
     ProtocolError(body:) -> websocket.ProtocolError(body:)
     UnexpectedCondition(body:) -> websocket.UnexpectedCondition(body:)
     UnexpectedDataType(body:) -> websocket.UnexpectedDataType(body:)
+    CustomCloseReason(code:, body:) -> websocket.CustomCloseReason(code:, body:)
   }
 }
 
-/// This closes the WebSocket connection with a particular close reason.
-pub fn close_with_reason(
+/// Closes without a reason.
+pub fn close(conn: Connection) {
+  close_with_reason(conn, NotProvided)
+}
+
+/// Status code: 1000
+pub fn close_normal(conn: Connection, body: BitArray) {
+  close_with_reason(conn, Normal(body:))
+}
+
+/// Status code: 1001
+pub fn close_going_away(conn: Connection, body: BitArray) {
+  close_with_reason(conn, GoingAway(body:))
+}
+
+/// Status code: 1002
+pub fn close_protocol_error(conn: Connection, body: BitArray) {
+  close_with_reason(conn, ProtocolError(body:))
+}
+
+/// Status code: 1003
+pub fn close_unexpected_data_type(conn: Connection, body: BitArray) {
+  close_with_reason(conn, UnexpectedDataType(body:))
+}
+
+/// Status code: 1007
+pub fn close_inconsistent_data_type(conn: Connection, body: BitArray) {
+  close_with_reason(conn, InconsistentDataType(body:))
+}
+
+/// Status code: 1008
+pub fn close_policy_violation(conn: Connection, body: BitArray) {
+  close_with_reason(conn, PolicyViolation(body:))
+}
+
+/// Status code: 1009
+pub fn close_message_too_big(conn: Connection, body: BitArray) {
+  close_with_reason(conn, MessageTooBig(body:))
+}
+
+/// Status code: 1010
+pub fn close_missing_extensions(conn: Connection, body: BitArray) {
+  close_with_reason(conn, MissingExtensions(body:))
+}
+
+/// Status code: 1011
+pub fn close_unexpected_condition(conn: Connection, body: BitArray) {
+  close_with_reason(conn, UnexpectedCondition(body:))
+}
+
+/// Accepts codes from 0 to 4999.
+pub fn close_custom(
+  conn: Connection,
+  code: Int,
+  body: BitArray,
+) -> Result(Nil, CustomCloseError) {
+  use <- bool.guard(when: code >= 5000, return: Error(InvalidCode))
+
+  close_with_reason(conn, CustomCloseReason(code:, body:))
+  |> result.map_error(SocketFail)
+}
+
+fn close_with_reason(
   conn: Connection,
   reason: CloseReason,
 ) -> Result(Nil, SocketReason) {
