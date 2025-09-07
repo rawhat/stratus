@@ -675,17 +675,32 @@ pub fn send_ping(conn: Connection, data: BitArray) -> Result(Nil, SocketReason) 
   |> result.map_error(convert_socket_reason)
 }
 
-pub opaque type CloseReason {
+pub type CloseReason {
   NotProvided
+  /// Status code: 1000
   Normal(body: BitArray)
+  /// Status code: 1001
   GoingAway(body: BitArray)
+  /// Status code: 1002
   ProtocolError(body: BitArray)
+  /// Status code: 1003
   UnexpectedDataType(body: BitArray)
+  /// Status code: 1007
   InconsistentDataType(body: BitArray)
+  /// Status code: 1008
   PolicyViolation(body: BitArray)
+  /// Status code: 1009
   MessageTooBig(body: BitArray)
+  /// Status code: 1010
   MissingExtensions(body: BitArray)
+  /// Status code: 1011
   UnexpectedCondition(body: BitArray)
+  /// Use [`close_custom`](#close_custom) to send a custom close code.
+  Custom(CustomCloseReason)
+}
+
+/// Use [`close_custom`](#close_custom) to send a custom close code.
+pub opaque type CustomCloseReason {
   CustomCloseReason(code: Int, body: BitArray)
 }
 
@@ -701,75 +716,29 @@ fn convert_close_reason(reason: CloseReason) -> websocket.CloseReason {
     ProtocolError(body:) -> websocket.ProtocolError(body:)
     UnexpectedCondition(body:) -> websocket.UnexpectedCondition(body:)
     UnexpectedDataType(body:) -> websocket.UnexpectedDataType(body:)
-    CustomCloseReason(code:, body:) -> websocket.CustomCloseReason(code:, body:)
+    Custom(CustomCloseReason(code:, body:)) ->
+      websocket.CustomCloseReason(code:, body:)
   }
 }
 
-/// Closes without a reason.
-pub fn close(conn: Connection) {
-  close_with_reason(conn, NotProvided)
-}
-
-/// Status code: 1000
-pub fn close_normal(conn: Connection, body: BitArray) {
-  close_with_reason(conn, Normal(body:))
-}
-
-/// Status code: 1001
-pub fn close_going_away(conn: Connection, body: BitArray) {
-  close_with_reason(conn, GoingAway(body:))
-}
-
-/// Status code: 1002
-pub fn close_protocol_error(conn: Connection, body: BitArray) {
-  close_with_reason(conn, ProtocolError(body:))
-}
-
-/// Status code: 1003
-pub fn close_unexpected_data_type(conn: Connection, body: BitArray) {
-  close_with_reason(conn, UnexpectedDataType(body:))
-}
-
-/// Status code: 1007
-pub fn close_inconsistent_data_type(conn: Connection, body: BitArray) {
-  close_with_reason(conn, InconsistentDataType(body:))
-}
-
-/// Status code: 1008
-pub fn close_policy_violation(conn: Connection, body: BitArray) {
-  close_with_reason(conn, PolicyViolation(body:))
-}
-
-/// Status code: 1009
-pub fn close_message_too_big(conn: Connection, body: BitArray) {
-  close_with_reason(conn, MessageTooBig(body:))
-}
-
-/// Status code: 1010
-pub fn close_missing_extensions(conn: Connection, body: BitArray) {
-  close_with_reason(conn, MissingExtensions(body:))
-}
-
-/// Status code: 1011
-pub fn close_unexpected_condition(conn: Connection, body: BitArray) {
-  close_with_reason(conn, UnexpectedCondition(body:))
-}
-
-/// Accepts codes from 0 to 4999.
+/// Closes the connection with a custom close code between 1000 and 4999. 
 pub fn close_custom(
   conn: Connection,
-  code: Int,
-  body: BitArray,
+  code code: Int,
+  body body: BitArray,
 ) -> Result(Nil, CustomCloseError) {
-  use <- bool.guard(when: code >= 5000, return: Error(InvalidCode))
+  use <- bool.guard(
+    when: code >= 5000 || code < 1000,
+    return: Error(InvalidCode),
+  )
 
-  close_with_reason(conn, CustomCloseReason(code:, body:))
+  close(conn, Custom(CustomCloseReason(code:, body:)))
   |> result.map_error(SocketFail)
 }
 
-fn close_with_reason(
+pub fn close(
   conn: Connection,
-  reason: CloseReason,
+  because reason: CloseReason,
 ) -> Result(Nil, SocketReason) {
   let reason = convert_close_reason(reason)
   let mask = crypto.strong_random_bytes(4)
