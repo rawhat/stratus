@@ -39,24 +39,79 @@ pub opaque type Connection {
 
 pub type SocketReason {
   SocketClosed
-  NotOwner
+  Timeout
   Badarg
-  Posix(String)
+  Terminated
+  Eaddrinuse
+  Eaddrnotavail
+  Eafnosupport
+  Ealready
+  Econnaborted
+  Econnrefused
+  Econnreset
+  Edestaddrreq
+  Ehostdown
+  Ehostunreach
+  Einprogress
+  Eisconn
+  Emsgsize
+  Enetdown
+  Enetunreach
+  Enopkg
+  Enoprotoopt
+  Enotconn
+  Enotty
+  Enotsock
+  Eproto
+  Eprotonosupport
+  Eprototype
+  Esocktnosupport
+  Etimedout
+  Ewouldblock
+  Exbadport
+  Exbadseq
 }
 
 fn convert_socket_reason(reason: socket.SocketReason) -> SocketReason {
   case reason {
-    socket.Closed -> SocketClosed
     socket.Badarg -> Badarg
-    socket.NotOwner -> NotOwner
-    socket.Posix(err) -> Posix(err)
+    socket.Closed -> SocketClosed
+    socket.Eaddrinuse -> Eaddrinuse
+    socket.Eaddrnotavail -> Eaddrnotavail
+    socket.Eafnosupport -> Eafnosupport
+    socket.Ealready -> Ealready
+    socket.Econnaborted -> Econnaborted
+    socket.Econnrefused -> Econnrefused
+    socket.Econnreset -> Econnreset
+    socket.Edestaddrreq -> Edestaddrreq
+    socket.Ehostdown -> Ehostdown
+    socket.Ehostunreach -> Ehostunreach
+    socket.Einprogress -> Einprogress
+    socket.Eisconn -> Eisconn
+    socket.Emsgsize -> Emsgsize
+    socket.Enetdown -> Enetdown
+    socket.Enetunreach -> Enetunreach
+    socket.Enopkg -> Enopkg
+    socket.Enoprotoopt -> Enoprotoopt
+    socket.Enotconn -> Enotconn
+    socket.Enotsock -> Enotsock
+    socket.Enotty -> Enotty
+    socket.Eproto -> Eproto
+    socket.Eprotonosupport -> Eprotonosupport
+    socket.Eprototype -> Eprototype
+    socket.Esocktnosupport -> Esocktnosupport
+    socket.Etimedout -> Etimedout
+    socket.Ewouldblock -> Ewouldblock
+    socket.Exbadport -> Exbadport
+    socket.Exbadseq -> Exbadseq
+    socket.Terminated -> Terminated
+    socket.Timeout -> Timeout
   }
 }
 
 fn from_socket_message(msg: SocketMessage) -> InternalMessage(user_message) {
   case msg {
     socket.Data(bits) -> Data(bits)
-    socket.Err(socket.Closed) -> Closed
     socket.Err(reason) -> Err(convert_socket_reason(reason))
   }
 }

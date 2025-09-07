@@ -1,7 +1,9 @@
 -module(stratus_ffi).
 
 -export([tcp_shutdown/2, tcp_send/2, ssl_shutdown/2, ssl_send/2, tcp_set_opts/2,
-         ssl_set_opts/2, ssl_start/0, custom_sni_matcher/0, ssl_controlling_process/2, tcp_controlling_process/2 ]).
+         ssl_set_opts/2, ssl_start/0, custom_sni_matcher/0,
+         ssl_controlling_process/2, tcp_controlling_process/2,
+         parse_known_socket_reason/1 ]).
 
 tcp_shutdown(Socket, How) ->
   case gen_tcp:shutdown(Socket, How) of
@@ -74,4 +76,41 @@ tcp_controlling_process(Socket, NewOwner) ->
   case gen_tcp:controlling_process(Socket, NewOwner) of
     ok -> {ok, nil};
     Error -> Error
+  end.
+
+parse_known_socket_reason(Reason) ->
+  case Reason of
+    closed -> {ok, closed};
+    timeout -> {ok, timeout};
+    badarg -> {ok, badarg};
+    terminated -> {ok, terminated};
+    eaddrinuse -> {ok, eaddrinuse};
+    eaddrnotavail -> {ok, eaddrnotavail};
+    eafnosupport -> {ok, eafnosupport};
+    ealready -> {ok, ealready};
+    econnaborted -> {ok, econnaborted};
+    econnrefused -> {ok, econnrefused};
+    econnreset -> {ok, econnreset};
+    edestaddrreq -> {ok, edestaddrreq};
+    ehostdown -> {ok, ehostdown};
+    ehostunreach -> {ok, ehostunreach};
+    einprogress -> {ok, einprogress};
+    eisconn -> {ok, eisconn};
+    emsgsize -> {ok, emsgsize};
+    enetdown -> {ok, enetdown};
+    enetunreach -> {ok, enetunreach};
+    enopkg -> {ok, enopkg};
+    enoprotoopt -> {ok, enoprotoopt};
+    enotconn -> {ok, enotconn};
+    enotty -> {ok, enotty};
+    enotsock -> {ok, enotsock};
+    eproto -> {ok, eproto};
+    eprotonosupport -> {ok, eprotonosupport};
+    eprototype -> {ok, eprototype};
+    esocktnosupport -> {ok, esocktnosupport};
+    etimedout -> {ok, etimedout};
+    ewouldblock -> {ok, ewouldblock};
+    exbadport -> {ok, exbadport};
+    exbadseq -> {ok, exbadseq};
+    Unknown -> {error, Unknown}
   end.

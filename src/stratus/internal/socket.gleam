@@ -3,15 +3,43 @@ import gleam/dynamic/decode
 import gleam/erlang/atom.{type Atom}
 import gleam/erlang/process.{type Selector}
 import gleam/list
-import gleam/string
+import gleam/result
 
 pub type Socket
 
 pub type SocketReason {
   Closed
-  NotOwner
+  Timeout
   Badarg
-  Posix(String)
+  Terminated
+  Eaddrinuse
+  Eaddrnotavail
+  Eafnosupport
+  Ealready
+  Econnaborted
+  Econnrefused
+  Econnreset
+  Edestaddrreq
+  Ehostdown
+  Ehostunreach
+  Einprogress
+  Eisconn
+  Emsgsize
+  Enetdown
+  Enetunreach
+  Enopkg
+  Enoprotoopt
+  Enotconn
+  Enotty
+  Enotsock
+  Eproto
+  Eprotonosupport
+  Eprototype
+  Esocktnosupport
+  Etimedout
+  Ewouldblock
+  Exbadport
+  Exbadseq
 }
 
 pub type TcpOption =
@@ -117,15 +145,27 @@ pub fn selector() -> Selector(Result(SocketMessage, List(decode.DecodeError))) {
   |> process.select_record(TcpClosed, 1, fn(_socket) { Ok(Err(Closed)) })
   |> process.select_record(TcpError, 2, fn(data) {
     {
-      use reason <- decode.field(2, decode.dynamic)
-      decode.success(Err(Posix(string.inspect(reason))))
+      use reason <- decode.field(2, atom.decoder())
+      parse_known_socket_reason(reason)
+      |> result.map(Err)
+      |> result.map(decode.success)
+      |> result.map_error(fn(_data) {
+        decode.failure(Err(Badarg), "SocketReason")
+      })
+      |> result.unwrap_both
     }
     |> decode.run(data, _)
   })
   |> process.select_record(SslError, 2, fn(data) {
     {
-      use reason <- decode.field(2, decode.dynamic)
-      decode.success(Err(Posix(string.inspect(reason))))
+      use reason <- decode.field(2, atom.decoder())
+      parse_known_socket_reason(reason)
+      |> result.map(Err)
+      |> result.map(decode.success)
+      |> result.map_error(fn(_data) {
+        decode.failure(Err(Badarg), "SocketReason")
+      })
+      |> result.unwrap_both
     }
     |> decode.run(data, _)
   })
@@ -136,3 +176,6 @@ pub fn get_certs() -> Dynamic
 
 @external(erlang, "stratus_ffi", "custom_sni_matcher")
 pub fn get_custom_matcher() -> Options
+
+@external(erlang, "stratus_ffi", "parse_known_socket_reason")
+fn parse_known_socket_reason(reason: Atom) -> Result(SocketReason, Dynamic)
