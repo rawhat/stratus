@@ -146,26 +146,34 @@ pub fn selector() -> Selector(Result(SocketMessage, List(decode.DecodeError))) {
   |> process.select_record(TcpError, 2, fn(data) {
     {
       use reason <- decode.field(2, atom.decoder())
-      parse_known_socket_reason(reason)
-      |> result.map(Err)
-      |> result.map(decode.success)
-      |> result.map_error(fn(_data) {
-        decode.failure(Err(Badarg), "SocketReason")
-      })
-      |> result.unwrap_both
+      let socket_message =
+        parse_known_socket_reason(reason)
+        |> result.map(Err)
+        |> result.map(decode.success)
+        |> result.map_error(fn(_data) {
+          decode.failure(Err(Badarg), "SocketReason")
+        })
+      case socket_message {
+        Ok(message) -> message
+        Error(message) -> message
+      }
     }
     |> decode.run(data, _)
   })
   |> process.select_record(SslError, 2, fn(data) {
     {
       use reason <- decode.field(2, atom.decoder())
-      parse_known_socket_reason(reason)
-      |> result.map(Err)
-      |> result.map(decode.success)
-      |> result.map_error(fn(_data) {
-        decode.failure(Err(Badarg), "SocketReason")
-      })
-      |> result.unwrap_both
+      let socket_message =
+        parse_known_socket_reason(reason)
+        |> result.map(Err)
+        |> result.map(decode.success)
+        |> result.map_error(fn(_data) {
+          decode.failure(Err(Badarg), "SocketReason")
+        })
+      case socket_message {
+        Ok(message) -> message
+        Error(message) -> message
+      }
     }
     |> decode.run(data, _)
   })
