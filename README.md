@@ -71,7 +71,7 @@ pub fn main() {
         }
       }
     })
-    |> stratus.on_close(fn(_state) { io.println("oh noooo") })
+    |> stratus.on_close(fn(_state, _reason) { io.println("oh noooo") })
     |> stratus.start
 
   let timer =
