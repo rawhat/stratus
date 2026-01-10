@@ -3,7 +3,6 @@ import gleam/dynamic/decode
 import gleam/erlang/atom.{type Atom}
 import gleam/erlang/process.{type Selector}
 import gleam/list
-import gleam/result
 
 pub type Socket
 
@@ -146,26 +145,26 @@ pub fn selector() -> Selector(Result(SocketMessage, List(decode.DecodeError))) {
   |> process.select_record(TcpError, 2, fn(data) {
     {
       use reason <- decode.field(2, atom.decoder())
-      parse_known_socket_reason(reason)
-      |> result.map(Err)
-      |> result.map(decode.success)
-      |> result.map_error(fn(_data) {
-        decode.failure(Err(Badarg), "SocketReason")
-      })
-      |> result.unwrap_both
+      case parse_known_socket_reason(reason) {
+        Ok(reason) -> decode.success(Err(reason))
+        Error(_reason) -> decode.failure(Err(Badarg), "SocketReason")
+      }
+      // |> result.map(Err)
+      // |> result.map(decode.success)
+      // |> result.map_error(fn(_data) {
+      //   decode.failure(Err(Badarg), "SocketReason")
+      // })
+      // |> result.unwrap_both
     }
     |> decode.run(data, _)
   })
   |> process.select_record(SslError, 2, fn(data) {
     {
       use reason <- decode.field(2, atom.decoder())
-      parse_known_socket_reason(reason)
-      |> result.map(Err)
-      |> result.map(decode.success)
-      |> result.map_error(fn(_data) {
-        decode.failure(Err(Badarg), "SocketReason")
-      })
-      |> result.unwrap_both
+      case parse_known_socket_reason(reason) {
+        Ok(reason) -> decode.success(Err(reason))
+        Error(_reason) -> decode.failure(Err(Badarg), "SocketReason")
+      }
     }
     |> decode.run(data, _)
   })
