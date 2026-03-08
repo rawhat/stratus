@@ -264,6 +264,7 @@ type State(state, user_message) {
     socket: Socket,
     user_state: state,
     compression: Option(compression.Compression),
+    socket_activated: Bool,
   )
 }
 
@@ -322,13 +323,6 @@ pub fn start(
 
   let context_takeovers = websocket.get_context_takeovers(extensions)
 
-  let assert Ok(_) =
-    transport.set_opts(
-      transport,
-      handshake_response.socket,
-      socket.convert_options([Receive(Once)]),
-    )
-
   actor.new_with_initialiser(1000, fn(subject) {
     let started_selector = process.select(process.new_selector(), subject)
     logging.log(logging.Debug, "Calling user initializer")
@@ -365,6 +359,7 @@ pub fn start(
       socket: handshake_response.socket,
       user_state: user_state,
       compression: context,
+      socket_activated: False,
     )
     |> actor.initialised
     |> actor.selecting(selector)
@@ -374,6 +369,18 @@ pub fn start(
   |> actor.on_message(fn(state, message) {
     case message {
       UserMessage(user_message) -> {
+        let state = case state.socket_activated {
+          False -> {
+            let assert Ok(_) =
+              transport.set_opts(
+                transport,
+                state.socket,
+                socket.convert_options([Receive(Once)]),
+              )
+            State(..state, socket_activated: True)
+          }
+          True -> state
+        }
         let conn =
           Connection(
             state.socket,
@@ -422,6 +429,18 @@ pub fn start(
         actor.stop_abnormal(string.inspect(reason))
       }
       Data(bits) -> {
+        let state = case state.socket_activated {
+          False -> {
+            let assert Ok(_) =
+              transport.set_opts(
+                transport,
+                state.socket,
+                socket.convert_options([Receive(Once)]),
+              )
+            State(..state, socket_activated: True)
+          }
+          True -> state
+        }
         let conn =
           Connection(
             state.socket,
