@@ -157,6 +157,7 @@ pub opaque type InternalMessage(user_message) {
   Err(SocketReason)
   Data(BitArray)
   Closed(CloseReason)
+  Ready
   Shutdown
 }
 
@@ -322,13 +323,6 @@ pub fn start(
 
   let context_takeovers = websocket.get_context_takeovers(extensions)
 
-  let assert Ok(_) =
-    transport.set_opts(
-      transport,
-      handshake_response.socket,
-      socket.convert_options([Receive(Once)]),
-    )
-
   actor.new_with_initialiser(1000, fn(subject) {
     let started_selector = process.select(process.new_selector(), subject)
     logging.log(logging.Debug, "Calling user initializer")
@@ -358,6 +352,7 @@ pub fn start(
       True -> Some(compression.init(context_takeovers))
       False -> None
     }
+    process.send(subject, Ready)
     State(
       buffer: <<>>,
       incomplete: None,
@@ -373,6 +368,15 @@ pub fn start(
   })
   |> actor.on_message(fn(state, message) {
     case message {
+      Ready -> {
+        let assert Ok(_) =
+          transport.set_opts(
+            transport,
+            handshake_response.socket,
+            socket.convert_options([Receive(Once)]),
+          )
+        actor.continue(state)
+      }
       UserMessage(user_message) -> {
         let conn =
           Connection(
