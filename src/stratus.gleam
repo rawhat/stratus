@@ -12,6 +12,7 @@ import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
+import gleam/otp/supervision
 import gleam/result
 import gleam/string
 import gleam/uri
@@ -26,7 +27,6 @@ import stratus/internal/socket.{
   type Socket, type SocketMessage, Cacerts, Once, Pull, Receive,
 }
 import stratus/internal/ssl
-import stratus/internal/tcp
 import stratus/internal/transport.{type Transport, Ssl, Tcp}
 
 /// This holds some information needed to communicate with the WebSocket.
@@ -268,16 +268,6 @@ type State(state, user_message) {
   )
 }
 
-/// These are the possible failures when calling `stratus.initialize`.
-pub type InitializationError {
-  // The WebSocket handshake failed for the provided reason
-  HandshakeFailed(HandshakeError)
-  // The actor failed to start, most likely due to a timeout in your `init`
-  ActorFailed(actor.StartError)
-  //
-  FailedToTransferSocket(SocketReason)
-}
-
 /// This opens the WebSocket connection with the provided `Builder`. It makes
 /// some assumptions about the request if you do not provide it.  It will use
 /// ports 80 or 443 for `ws` or `wss` respectively.
@@ -292,39 +282,43 @@ pub fn start(
   builder: Builder(state, user_message),
 ) -> Result(
   actor.Started(Subject(InternalMessage(user_message))),
-  InitializationError,
+  actor.StartError,
 ) {
   let transport = case builder.request.scheme {
     Https -> Ssl
     _ -> Tcp
   }
 
-  let handshake_result =
-    perform_handshake(builder.request, transport, builder.connect_timeout)
-    |> result.map_error(fn(reason) {
-      let msg = case reason {
-        UpgradeFailed(resp) ->
-          "WebSocket handshake failed with status "
-          <> int.to_string(resp.status)
-        reason -> "WebSocket handshake failed: " <> string.inspect(reason)
-      }
-      logging.log(logging.Error, msg)
-      HandshakeFailed(reason)
-    })
+  // Adding a small buffer to the timeout here for the rest of the init function
+  let timeout = builder.connect_timeout + 100
 
-  use handshake_response <- result.try(handshake_result)
-  logging.log(logging.Debug, "Handshake successful")
-
-  let extensions =
-    handshake_response.response
-    |> response.get_header("sec-websocket-extensions")
-    |> result.map(string.split(_, "; "))
-    |> result.unwrap([])
-
-  let context_takeovers = websocket.get_context_takeovers(extensions)
-
-  actor.new_with_initialiser(1000, fn(subject) {
+  actor.new_with_initialiser(timeout, fn(subject) {
     let started_selector = process.select(process.new_selector(), subject)
+
+    let handshake_result =
+      perform_handshake(builder.request, transport, builder.connect_timeout)
+      |> result.map_error(fn(reason) {
+        let msg = case reason {
+          UpgradeFailed(resp) ->
+            "WebSocket handshake failed with status "
+            <> int.to_string(resp.status)
+          reason -> "WebSocket handshake failed: " <> string.inspect(reason)
+        }
+        logging.log(logging.Error, msg)
+        msg
+      })
+
+    use handshake_response <- result.try(handshake_result)
+    logging.log(logging.Debug, "Handshake successful")
+
+    let extensions =
+      handshake_response.response
+      |> response.get_header("sec-websocket-extensions")
+      |> result.map(string.split(_, "; "))
+      |> result.unwrap([])
+
+    let context_takeovers = websocket.get_context_takeovers(extensions)
+
     logging.log(logging.Debug, "Calling user initializer")
     use Initialised(user_state, user_selector) <- result.try(builder.init())
     let selector = case user_selector {
@@ -354,7 +348,7 @@ pub fn start(
     }
     process.send(subject, Ready)
     State(
-      buffer: <<>>,
+      buffer: handshake_response.buffer,
       incomplete: None,
       self: subject,
       socket: handshake_response.socket,
@@ -372,9 +366,13 @@ pub fn start(
         let assert Ok(_) =
           transport.set_opts(
             transport,
-            handshake_response.socket,
+            state.socket,
             socket.convert_options([Receive(Once)]),
           )
+        let _ = case state.buffer {
+          <<>> -> Nil
+          data -> process.send(state.self, Data(data))
+        }
         actor.continue(state)
       }
       UserMessage(user_message) -> {
@@ -492,24 +490,10 @@ pub fn start(
     }
   })
   |> actor.start
-  |> result.map_error(ActorFailed)
-  |> result.try(fn(started) {
-    case transport {
-      Tcp -> tcp.controlling_process(handshake_response.socket, started.pid)
-      Ssl -> ssl.controlling_process(handshake_response.socket, started.pid)
-    }
-    |> result.map_error(fn(socket_reason) {
-      FailedToTransferSocket(convert_socket_reason(socket_reason))
-    })
-    |> result.map(fn(_nil) { started })
-  })
-  |> result.map(fn(started) {
-    let _ = case handshake_response.buffer {
-      <<>> -> Nil
-      data -> process.send(started.data, Data(data))
-    }
-    started
-  })
+}
+
+pub fn supervised(builder: Builder(state, user_message)) {
+  supervision.worker(fn() { start(builder) })
 }
 
 fn handle_frame(
@@ -616,7 +600,7 @@ fn handle_frame(
   }
 }
 
-/// The `Subject` returned from `initialize` is an opaque type.  In order to
+/// The `Subject` returned from `start` is an opaque type.  In order to
 /// send custom messages to your process, you can do this mapping.
 ///
 /// For example:
