@@ -157,7 +157,7 @@ pub opaque type InternalMessage(user_message) {
   Err(SocketReason)
   Data(BitArray)
   Closed(CloseReason)
-  Ready
+  Ready(BitArray)
   Shutdown
 }
 
@@ -346,9 +346,9 @@ pub fn start(
       True -> Some(compression.init(context_takeovers))
       False -> None
     }
-    process.send(subject, Ready)
+    process.send(subject, Ready(handshake_response.buffer))
     State(
-      buffer: handshake_response.buffer,
+      buffer: <<>>,
       incomplete: None,
       self: subject,
       socket: handshake_response.socket,
@@ -362,17 +362,17 @@ pub fn start(
   })
   |> actor.on_message(fn(state, message) {
     case message {
-      Ready -> {
+      Ready(buffer) -> {
+        let _ = case buffer {
+          <<>> -> Nil
+          data -> process.send(state.self, Data(data))
+        }
         let assert Ok(_) =
           transport.set_opts(
             transport,
             state.socket,
             socket.convert_options([Receive(Once)]),
           )
-        let _ = case state.buffer {
-          <<>> -> Nil
-          data -> process.send(state.self, Data(data))
-        }
         actor.continue(state)
       }
       UserMessage(user_message) -> {
